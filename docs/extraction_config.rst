@@ -39,9 +39,11 @@ e.g.
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "roi_type_labels",
-        "description": "A list of labels for the regions of interest (ROI) to use in the analysis. The labels must match the names 
-            of the corresponding CSV files. For example, if you have a csv file named ``roiNames_GTV.csv``, 
-            then the ``roi_type_labels`` msut be ``[\"GTV\"]``.",
+        "description": "Optional. A list of labels for the regions of interest (ROI) to use in the analysis. The labels must match the names
+            of the corresponding CSV files. For example, if you have a csv file named ``roiNames_GTV.csv``,
+            then the ``roi_type_labels`` msut be ``[\"GTV\"]``. Defaults to ``[\"ROI\"]`` when not given.
+            When no csv file is used, only the first label of the list is processed, since every label would
+            otherwise produce the exact same features.",
         "type": "List[str]"
     }
 
@@ -58,10 +60,11 @@ e.g.
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "roi_types",
-        "description": "A list of labels that describe the regions of interest, used to save the analysis results. The labels must accurately 
+        "description": "Optional. A list of labels that describe the regions of interest, used to save the analysis results. The labels must accurately
             reflect the regions analyzed. For instance, if you conduct an analysis of a single ROI in a  ``\"GTV\"`` area with
             two different ROIs (``\"Mass\"`` and ``\"Edema\"``), the label can be ``[\"GTVMassOnly\"]``. This name will be displayed in the
-            JSON results file.",
+            JSON results file. Defaults to ``[\"all\"]`` when not given, and must have the same number of entries
+            as ``roi_type_labels``.",
         "type": "List[str]"
     }
 
@@ -153,7 +156,9 @@ e.g.
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "path_csv",
-        "description": "Path to your dataset csv file (Read more about the :doc:`../csv_file`)",
+        "description": "Optional. Path to your dataset csv file (Read more about the :doc:`../csv_file`).
+            If not given, all the scans found in the given path are analyzed, using the union of all
+            the ROIs of each scan.",
         "type": "str"
     }
 

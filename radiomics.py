@@ -7,12 +7,20 @@ from typing import List, Optional
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="radiomics",
-        description="Run radiomics feature extraction on NIfTI or DICOM files."
+        description="Run radiomics feature extraction on NIfTI or DICOM files. "
+                    "By default every scan found in the input folder is processed, using the "
+                    "union of all the ROIs of each scan."
     )
     parser.add_argument("path_input", help="Path to the input dataset folder.")
-    parser.add_argument("path_csv", help="Path to the CSV file with ROI mappings.")
     parser.add_argument("path_settings", help="Path to the radiomics extraction settings file.")
     parser.add_argument("path_save", help="Path where feature files will be written.")
+    parser.add_argument(
+        "--path-csv",
+        default=None,
+        help="Optional path to the CSV file with ROI mappings (columns: PatientID, "
+             "ImagingScanName, ImagingModality, ROIname). If omitted, every scan found in the "
+             "input folder is processed and all of its ROIs are combined into a single region."
+    )
     format_group = parser.add_mutually_exclusive_group()
     format_group.add_argument(
         "--use-niftis",
@@ -46,9 +54,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     extractor = batch_extractor_cls(
         path_read=Path(args.path_input),
-        path_csv=Path(args.path_csv),
         path_params=Path(args.path_settings),
         path_save=Path(args.path_save),
+        path_csv=Path(args.path_csv) if args.path_csv else None,
         n_batch=args.n_batch,
         use_niftis=use_niftis,
         use_dicoms=args.use_dicoms,

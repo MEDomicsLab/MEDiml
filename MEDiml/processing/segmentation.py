@@ -23,17 +23,18 @@ _logger = logging.getLogger(__name__)
 
 
 def get_roi_from_indexes(
-        medscan: MEDscan, 
-        name_roi: str, 
-        box_string: str
+        medscan: MEDscan,
+        name_roi: str = None,
+        box_string: str = 'box'
     ) -> Tuple[image_volume_obj, image_volume_obj]:
     """Extracts the ROI box (+ smallest box containing the region of interest)
     and associated mask from the indexes saved in ``medscan`` scan.
-    
+
     Args:
         medscan (MEDscan): The MEDscan class object.
-        name_roi (str): name of the ROI since the a volume can have multiple
-            ROIs.
+        name_roi (str, optional): name of the ROI since the a volume can have multiple
+            ROIs. Ex: '{GTV}' or '{ED}+{ET}'. If None or empty, the union of all the
+            ROIs found in ``medscan`` is used (i.e. '{ED}+{ET}+{NET}').
         box_string (str): Specifies the size if the box containing the ROI
 
             - 'full': Full imaging data as output.
@@ -56,11 +57,25 @@ def get_roi_from_indexes(
     # as well using the argument "box". No fourth
     # argument means 'interp' by default.
 
+    # AUTO-DISCOVERY OF THE ROI NAME
+    # Done outside of the try/except below so that a scan without any usable ROI raises
+    # instead of being silently reported as a pre-processing problem.
+    if name_roi is None or (isinstance(name_roi, str) and not name_roi.strip()):
+        name_roi = medscan.data.ROI.get_union_roi_name()
+        if not name_roi:
+            raise ValueError(
+                "No ROI name was given and no usable ROI was found in the scan "
+                f"(patientID='{getattr(medscan, 'patientID', '')}'). Either provide a "
+                "`name_roi` or a ROI CSV file, or check that the masks of the scan were "
+                "correctly loaded.")
+        _logger.info(f"No ROI name given, using the union of all the ROIs: {name_roi}")
+
     # PARSING OF ARGUMENTS
     try:
         name_structure_set = []
         delimiters = ["\+", "\-"]
-        n_contour_data = len(medscan.data.ROI.indexes)
+        available_rois = medscan.data.ROI.get_roi_names(exclude_invalid=False)
+        n_contour_data = len(available_rois)
 
         name_roi, vect_plus_minus = get_sep_roi_names(name_roi, delimiters)
         contour_number = np.zeros(len(name_roi))
@@ -75,18 +90,27 @@ def get_roi_from_indexes(
                     "The numbers of defined ROI names and Structure Set names are not the same")
 
         for i in range(0, len(name_roi)):
+            found = False
             for j in range(0, n_contour_data):
-                name_temp = medscan.data.ROI.get_roi_name(key=j)
+                name_temp = available_rois[j]
                 if name_temp == name_roi[i]:
                     if name_structure_set:
                         # FOR DICOM + RTSTRUCT
                         name_set_temp = medscan.data.ROI.get_name_set(key=j)
                         if name_set_temp == name_structure_set[i]:
                             contour_number[i] = j
+                            found = True
                             break
                     else:
                         contour_number[i] = j
+                        found = True
                         break
+            if not found:
+                # Without this check the ROI silently defaults to the first one of the
+                # scan, and the features of the wrong region get extracted.
+                raise ValueError(
+                    f"The ROI '{name_roi[i]}' was not found in the scan. "
+                    f"Available ROIs: {available_rois}")
 
         n_roi = np.size(contour_number)
         # contour_string IS FOR EXAMPLE '3' or '1-3+2'
@@ -147,6 +171,8 @@ def get_roi_from_indexes(
         if medscan and medscan.params.process.scale_non_text:
             medscan.radiomics.image.update(
                 {('scale'+(str(medscan.params.process.scale_non_text[0])).replace('.', 'dot')): 'ERROR_PROCESSING'})
+
+        raise Exception(message)
 
     return vol_obj, roi_obj
 

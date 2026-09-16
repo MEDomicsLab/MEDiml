@@ -16,7 +16,12 @@ import ray
 from tqdm import trange
 
 import MEDiml
+from MEDiml.utils.parse_nifti_name import is_nifti_file, is_roi_file, parse_nifti_name
 from MEDiml.wrangling.DataManager import DataManager
+
+# Used to name the saved features when no roi type is defined in the parameters file.
+DEFAULT_ROI_TYPE = 'all'
+DEFAULT_ROI_TYPE_LABEL = 'ROI'
 
 
 class BatchExtractor(object):
@@ -27,9 +32,9 @@ class BatchExtractor(object):
     def __init__(
             self,
             path_read: Union[str, Path],
-            path_csv: Union[str, Path],
             path_params: Union[str, Path],
             path_save: Union[str, Path],
+            path_csv: Union[str, Path] = None,
             pred_doses_csv: Union[str, Path] = None,
             presc_dose_column: str = None,
             n_batch: int = 4,
@@ -38,7 +43,11 @@ class BatchExtractor(object):
             skip_existing: bool = False
     ) -> None:
         """
-        constructor of the BatchExtractor class 
+        constructor of the BatchExtractor class
+
+        Note:
+            ``path_csv`` is optional. If it is not given, all the scans found in ``path_read``
+            are processed, using the union of all the ROIs of each scan.
         """
 
         assert not (use_niftis and use_dicoms), "Please select either NIfTI files or DICOM files "
@@ -47,7 +56,15 @@ class BatchExtractor(object):
         if not Path(path_read).exists():
             raise ValueError("The provided path for reading scan files does not exist. Please check the path and try again.")
 
-        self._path_csv = Path(path_csv)
+        # Catches the callers still using the previous argument order, where the ROI CSV
+        # file was the second positional argument.
+        if str(path_params).lower().endswith('.csv'):
+            raise ValueError(
+                'The "path_params" argument looks like a CSV file. The BatchExtractor arguments '
+                'order has changed, it is now (path_read, path_params, path_save, path_csv=None). '
+                'Please pass the ROI CSV file using the "path_csv" keyword argument.')
+
+        self._path_csv = Path(path_csv) if path_csv else None
         self._path_params = Path(path_params)
         self._path_npy = Path(path_read) if path_read else None
         self._path_dicoms = Path(path_read) if path_read else None
@@ -66,13 +83,146 @@ class BatchExtractor(object):
         """Load and process the computing & batch parameters from JSON file"""
         # Load json parameters
         im_params = MEDiml.utils.json_utils.load_json(self._path_params)
-        
+
+        # The roi types are only used to name the saved features, so they are optional.
+        roi_types = im_params.get('roi_types') or [DEFAULT_ROI_TYPE]
+        roi_type_labels = im_params.get('roi_type_labels') or [DEFAULT_ROI_TYPE_LABEL]
+
+        if len(roi_types) != len(roi_type_labels):
+            raise ValueError(
+                f'"roi_types" ({len(roi_types)} entries) and "roi_type_labels" '
+                f'({len(roi_type_labels)} entries) must have the same number of entries in the '
+                'parameters JSON file.')
+
+        for roi_type_label in roi_type_labels:
+            # Parentheses would break the naming of the saved features (see save_radiomics).
+            if '(' in roi_type_label or ')' in roi_type_label:
+                raise ValueError(
+                    f'The "roi_type_labels" entries must not contain parentheses: "{roi_type_label}".')
+
+        # Without a ROI CSV file every roi type would extract the exact same features, so
+        # only the first one is kept to avoid duplicating the work.
+        if self._path_csv is None and len(roi_types) > 1:
+            message = (
+                'No ROI CSV file was given and more than one roi type is defined in the parameters '
+                f'file. Only the first one ("{roi_types[0]}"/"{roi_type_labels[0]}") will be used.')
+            logging.warning(message)
+            print(f'\n WARNING: {message}')
+            roi_types = roi_types[:1]
+            roi_type_labels = roi_type_labels[:1]
+
         # Update class attributes
-        self.roi_types.extend(im_params['roi_types'])
-        self.roi_type_labels.extend(im_params['roi_type_labels'])
+        self.roi_types.extend(roi_types)
+        self.roi_type_labels.extend(roi_type_labels)
         self.n_bacth = im_params['n_batch'] if 'n_batch' in im_params else self.n_bacth
 
         return im_params
+
+    @staticmethod
+    def __peek_dicom_modality(scan_dir: Path) -> Union[str, None]:
+        """Reads the modality of a DICOM scan folder from the header of its first image file.
+
+        Args:
+            scan_dir(Path): Path to the folder holding the DICOM files of one scan.
+
+        Returns:
+            Union[str, None]: The modality of the scan (ex: 'CTscan'), None if it could
+            not be determined.
+        """
+        import pydicom
+
+        for file in sorted(scan_dir.rglob('*')):
+            if not file.is_file():
+                continue
+            try:
+                header = pydicom.dcmread(str(file), stop_before_pixels=True, force=True)
+            except Exception:
+                continue
+            modality = getattr(header, 'Modality', None)
+            # The radiotherapy files (RTSTRUCT, RTDOSE...) do not define the scan modality.
+            if modality and str(modality) in ['MR', 'PT', 'CT', 'ADC']:
+                return str(modality) + 'scan'
+
+        return None
+
+    def __discover_scans(self) -> Dict:
+        """Finds all the scans available in the read path, used when no ROI CSV file is given.
+
+        The scans are identified the same way they are in the ROI CSV file, so that the
+        batches can be created without any other change. The ROI names are left undefined,
+        which makes the extraction use the union of all the ROIs of each scan.
+
+        Returns:
+            Dict: Dict of the lists of patient IDs, imaging scan names, imaging modalities
+            and ROI names (all None) of every scan found.
+        """
+        scans = []
+        scans_found = set()
+
+        if self.use_niftis:
+            path_read = self._path_niftis
+            for file in sorted(path_read.rglob('*.nii*')):
+                if not is_nifti_file(file) or is_roi_file(file):
+                    # The ROI masks are associated to their scan when it gets loaded.
+                    continue
+                patient_id, sequence, _, modality = parse_nifti_name(file)
+                if not (patient_id and sequence and modality):
+                    continue
+                # The same scan is duplicated once per ROI, so it must be de-duplicated.
+                scan = (patient_id, sequence, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
+
+        elif self.use_dicoms:
+            path_read = self._path_dicoms
+            # The DICOM datasets are organized as "path_read/PatientID/ImagingScanName".
+            for patient_dir in sorted(p for p in path_read.iterdir() if p.is_dir()):
+                for scan_dir in sorted(s for s in patient_dir.iterdir() if s.is_dir()):
+                    modality = self.__peek_dicom_modality(scan_dir)
+                    if modality is None:
+                        logging.warning(f"Could not determine the modality of {scan_dir}, skipping it.")
+                        continue
+                    scan = (patient_dir.name, scan_dir.name, modality)
+                    if scan not in scans_found:
+                        scans_found.add(scan)
+                        scans += [scan]
+
+        else:
+            path_read = self._path_npy
+            for file in sorted(path_read.rglob('*.npy')):
+                name = file.name[:-len('.npy')]
+                # Skip the radiomics tables created by a previous extraction.
+                if name.startswith('radiomics__') or any(
+                        part.startswith('features(') for part in file.parts):
+                    continue
+                if '__' not in name or '.' not in name:
+                    continue
+                # `rsplit` is used since an imaging scan name may itself contain a dot.
+                head, modality = name.rsplit('.', 1)
+                patient_id, _, sequence = head.partition('__')
+                if not (patient_id and sequence and modality):
+                    continue
+                scan = (patient_id, sequence, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
+
+        if not scans:
+            raise ValueError(
+                f'No scan was found in the given path: {path_read}. Please provide a ROI CSV file '
+                'using the "path_csv" argument, or check the read path and the selected format '
+                '("use_niftis"/"use_dicoms").')
+
+        print(f'\n --> No ROI CSV file given: found {len(scans)} scan(s), the union of all the '
+              'ROIs of each scan will be used.')
+
+        return {
+            'patient_ids': [scan[0] for scan in scans],
+            'sequences': [scan[1] for scan in scans],
+            'modalities': [scan[2] for scan in scans],
+            'roi_names': [None] * len(scans),
+        }
 
     @ray.remote
     def __compute_radiomics_one_patient(
@@ -94,7 +244,8 @@ class BatchExtractor(object):
             patient_id(str): ID of the patient.
             modality(str): Modality of the scan (CT, MR, PT).
             sequence(str): Name of the scan sequence (e.g., T1, T2, FLAIR for MR scans).
-            roi_name(str): name of the ROI that will  be used in computation.
+            roi_name(str): name of the ROI that will  be used in computation. If None, the
+                union of all the ROIs of the scan is used.
             im_params(Dict): Dict of parameters/settings that will be used in the processing and computation.
             roi_type(str): Type of ROI used in the processing and computation (for identification purposes)
             roi_type_label(str): Label of the ROI used, to make it identifiable from other ROIs.
@@ -123,27 +274,35 @@ class BatchExtractor(object):
 
         # Load nifti files if the option is selected.
         medscan = None
+        # Name used to save the features. It must hold exactly one "(...)" group, since
+        # save_radiomics() replaces its content with the roi type label.
+        name_patient = f'{patient_id}__{sequence}({roi_type_label})'
+
         if self.use_niftis:
             try:
-                name_patient = patient_id + '__' + sequence + f'{roi_name.replace("{", "(").replace("}", ")")}'
-                all_niftis = [file for file in self._path_niftis.rglob(f"{name_patient}*.nii*")]
+                # The ROI part of the file name is not used to find the scan, so that all
+                # the ROIs of the scan can be loaded (and not only the requested ones).
+                search_name = f'{patient_id}__{sequence}'
+                all_niftis = [file for file in self._path_niftis.rglob(f"{search_name}*.nii*")]
                 if len(all_niftis) == 0:
-                    logging.error(f"No NIfTI files found for {name_patient} in {self._path_niftis}.")
+                    logging.error(f"No NIfTI files found for {search_name} in {self._path_niftis}.")
                     return log_file
-                nifti_scan_path = [file for file in all_niftis if file.name.endswith(f".{modality}.nii.gz") or file.name.endswith(f".{modality}.nii")][0]
-                nifti_roi_path = [file for file in all_niftis if file.name.endswith(f".ROI.nii.gz") or file.name.endswith(f".ROI.nii")][0]
-                if nifti_scan_path.exists() and nifti_roi_path.exists():
-                    dm = DataManager()
-                    medscan = dm.process_one_nifti(nifti_scan_path, nifti_roi_path)
-                else:
-                    logging.error(f"NIfTI files not found for {name_patient}. Expected paths: {nifti_scan_path}, {nifti_roi_path}")
+                scan_paths = sorted(file for file in all_niftis
+                                    if file.name.endswith(f".{modality}.nii.gz") or file.name.endswith(f".{modality}.nii"))
+                if len(scan_paths) == 0:
+                    logging.error(f"No {modality} NIfTI image found for {search_name} in {self._path_niftis}.")
                     return log_file
+                # The scan is duplicated once per ROI, all the copies hold the same image.
+                nifti_scan_path = scan_paths[0]
+                dm = DataManager()
+                # The read path (and not a single mask file) is given so that every ROI of
+                # the scan gets associated to it.
+                medscan = dm.process_one_nifti(nifti_scan_path, self._path_niftis)
             except Exception as e:
                 logging.error(f"Error loading NIfTI files for {patient_id}: {e}")
                 return log_file
         elif self.use_dicoms:
             try:
-                name_patient = patient_id + '__' + sequence + f'{roi_name.replace("{", "(").replace("}", ")")}'
                 dicom_scan_path = self._path_dicoms / patient_id / sequence
                 if dicom_scan_path.exists():
                     dm = DataManager(path_to_dicoms=dicom_scan_path)
@@ -178,8 +337,9 @@ class BatchExtractor(object):
                 name_roi=roi_name,
                 box_string=medscan.params.process.box_string
             )
-        except:
-            # if for the current scan ROI is not found, computation is aborted. 
+        except Exception as e:
+            # if for the current scan ROI is not found, computation is aborted.
+            logging.error(f"ROI extraction failed for {patient_id} ({sequence}): {e}")
             return log_file
 
         start = time()
@@ -258,7 +418,7 @@ class BatchExtractor(object):
 
         # check if ROI is empty
         if math.isnan(np.nanmax(vol_int_re)) and math.isnan(np.nanmin(vol_int_re)):
-            logging.error(f'PROBLEM WITH INTENSITY MASK. ROI {roi_name} IS EMPTY.')
+            logging.error(f'PROBLEM WITH INTENSITY MASK. ROI {roi_name or "(union of all ROIs)"} IS EMPTY.')
             return log_file
         
         # Computation of non-texture features
@@ -567,7 +727,7 @@ class BatchExtractor(object):
                         roi_type_label=roi_type_label,
                         used_niftis=self.use_niftis,
                         used_dicoms=self.use_dicoms,
-                        modality=modality
+                        modality=modality or medscan.type
                     )
         
         logging.info(f"TOTAL TIME:{time() - t_start} seconds\n\n")
@@ -672,39 +832,48 @@ class BatchExtractor(object):
             roi_type_label = self.roi_type_labels[r]
             print(f'\n --> Computing features for the "{roi_type_label}" roi type ...', end = '')
 
-            # Check if the CSV file exists
-            if not self._path_csv.exists():
-                raise FileNotFoundError(f'ROIs CSV file not found at path: {self._path_csv}. Please check the path and try again.')
+            if self._path_csv is not None:
+                # Check if the CSV file exists
+                if not self._path_csv.exists():
+                    raise FileNotFoundError(f'ROIs CSV file not found at path: {self._path_csv}. Please check the path and try again.')
 
-            # READING CSV EXPERIMENT TABLE
-            tabel_roi = pd.read_csv(self._path_csv)
+                # READING CSV EXPERIMENT TABLE
+                tabel_roi = pd.read_csv(self._path_csv)
 
-            # Check if all the requires columns are present
-            for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
-                if col not in list(tabel_roi.columns):
-                    raise ValueError(f'Missing column "{col}" in the ROI CSV file for roi type "{roi_type_label}". \
-                        Please check that the CSV file contains all the required columns: "PatientID", "ImagingScanName", " \
-                        "ImagingModality" and "ROIname".')
+                # Check if all the requires columns are present
+                for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
+                    if col not in list(tabel_roi.columns):
+                        raise ValueError(f'Missing column "{col}" in the ROI CSV file for roi type "{roi_type_label}". \
+                            Please check that the CSV file contains all the required columns: "PatientID", "ImagingScanName", " \
+                            "ImagingModality" and "ROIname".')
 
-            # Filter out patients not present in the read path
-            if self.use_niftis:
-                all_files = list(self._path_niftis.rglob('*.nii*'))
-                condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
-            elif self.use_dicoms:
-                condition = lambda x: (self._path_dicoms / f"{x['PatientID']}/{x['ImagingScanName']}").exists()
+                # Filter out patients not present in the read path
+                if self.use_niftis:
+                    all_files = list(self._path_niftis.rglob('*.nii*'))
+                    condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
+                elif self.use_dicoms:
+                    condition = lambda x: (self._path_dicoms / f"{x['PatientID']}/{x['ImagingScanName']}").exists()
+                else:
+                    all_files = list(self._path_npy.rglob('*.npy'))
+                    condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
+                tabel_roi = tabel_roi[tabel_roi.apply(condition, axis=1)]
+
+                # Check if the table is not empty
+                if tabel_roi.empty:
+                    raise ValueError(f'No valid scan files found for roi type "{roi_type_label}".')
+
+                patient_ids = tabel_roi['PatientID'].tolist()
+                modalities = tabel_roi['ImagingModality'].tolist()
+                sequences = tabel_roi['ImagingScanName'].tolist()
+                roi_names = tabel_roi['ROIname'].tolist()
             else:
-                all_files = list(self._path_npy.rglob('*.npy'))
-                condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
-            tabel_roi = tabel_roi[tabel_roi.apply(condition, axis=1)]
-
-            # Check if the table is not empty
-            if tabel_roi.empty:
-                raise ValueError(f'No valid scan files found for roi type "{roi_type_label}".')
-
-            patient_ids = tabel_roi['PatientID'].tolist()
-            modalities = tabel_roi['ImagingModality'].tolist()
-            sequences = tabel_roi['ImagingScanName'].tolist()
-            roi_names = tabel_roi['ROIname'].tolist()
+                # No CSV file given, all the scans found in the read path are processed
+                # using the union of all the ROIs of each scan.
+                discovered_scans = self.__discover_scans()
+                patient_ids = discovered_scans['patient_ids']
+                modalities = discovered_scans['modalities']
+                sequences = discovered_scans['sequences']
+                roi_names = discovered_scans['roi_names']
 
             # Read dose information if dose features extraction is enabled
             presc_doses = None
@@ -870,7 +1039,8 @@ class BatchExtractor(object):
 
     def compute_radiomics(self, create_tables: bool = True) -> None:
         """Compute all radiomic features for all scans in the CSV file (set in initialization) and organize it
-        in JSON and CSV files
+        in JSON and CSV files. If no CSV file was given, all the scans found in the read path are
+        processed, using the union of all the ROIs of each scan.
 
         Args:
             create_tables(bool) : True to create CSV tables for the extracted features and not save it in JSON only.

@@ -47,7 +47,16 @@ For more installation options (Conda, Poetry...) check out the [installation doc
 After installation, you can launch radiomics extraction directly from the terminal:
 
 ```bash
-radiomics <path/to/input> <path/to/csv_file> <path/to/settings_file> <path/save> --use-niftis --n-batch 4 --skip-existing
+radiomics <path/to/input> <path/to/settings_file> <path/save> --use-niftis --n-batch 4 --skip-existing
+```
+
+By default, every scan found in the input folder is processed, and all the ROIs of a scan are
+combined into a single region (i.e. `{ROI_1}+{ROI_2}`). To process a specific list of scans and
+ROIs instead, pass a [CSV file](https://mediml.readthedocs.io/en/latest/csv_file.html) with the
+optional `--path-csv` argument:
+
+```bash
+radiomics <path/to/input> <path/to/settings_file> <path/save> --path-csv <path/to/csv_file>
 ```
 
 For DICOM format, use `--use-dicoms` instead of `--use-niftis`.
@@ -83,7 +92,8 @@ dm = MEDiml.DataManager(path_dicoms=os.getcwd())
 # Process the DICOM files and retrieve the MEDiml object
 med_obj = dm.process_all_dicoms()[0]
 
-# Extract ROI mask from the object
+# Extract ROI mask from the object. `name_roi` is optional: when it is omitted,
+# the union of all the ROIs found in the object is used.
 vol_obj_init, roi_obj_init = MEDiml.processing.get_roi_from_indexes(
             med_obj,
             name_roi='{ED}+{ET}+{NET}',
