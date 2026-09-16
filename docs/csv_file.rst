@@ -1,9 +1,15 @@
 CSV File
 ========
 
-In ``MEDiml`` every dataset must have a csv file along with it, this file contains information 
+.. note::
+    **The csv file is optional.** If you do not provide one, ``MEDiml`` processes every scan
+    found in the given dataset folder and combines all the ROIs of a scan into a single
+    region (i.e. ``"{ROI_1}+{ROI_2}"``). Use a csv file when you want to analyze a specific
+    subset of the scans, or a specific ROI (or combination of ROIs) of each scan.
+
+In ``MEDiml`` a dataset can have a csv file along with it, this file contains information
 about the scans in the dataset that will be used in the radiomics analysis, especially region of interest (ROI) names used in
-each scan. Since scans can have multiple regions of interest (ROIs), the user needs to specify for each scan the ROI name(s) to use
+each scan. Since scans can have multiple regions of interest (ROIs), the user can specify for each scan the ROI name(s) to use
 for the processing and radiomics extraction. The csv files are also used by the ``DataManager`` in pre-checks and
 summary creation (after raw data processing). The different columns of the file are:
 
@@ -346,7 +352,17 @@ Now use the CSV file with MEDiml::
 
   be = BatchExtractor(
       path_read=brain_mets_data,
+      path_params='path/to/your/config.yml',
+      path_save='path/to/save/processed/data',
       path_csv='brain_mets_data/roi_csv/roiNames_Targets.csv',
+      use_dicoms=True
+  )
+
+Or, without any csv file, to process every scan of the dataset using the union of all the
+ROIs of each scan::
+
+  be = BatchExtractor(
+      path_read=brain_mets_data,
       path_params='path/to/your/config.yml',
       path_save='path/to/save/processed/data',
       use_dicoms=True

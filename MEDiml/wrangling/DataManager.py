@@ -27,6 +27,7 @@ from ..utils.get_file_paths import get_file_paths
 from ..utils.get_patient_names import get_patient_names
 from ..utils.imref import imref3d
 from ..utils.json_utils import load_json, save_json
+from ..utils.parse_nifti_name import parse_nifti_name
 from ..utils.save_MEDscan import save_MEDscan
 from .ProcessDICOM import ProcessDICOM
 
@@ -517,9 +518,10 @@ class DataManager(object):
             MEDscan: MEDscan class instance.
         """
         medscan = MEDscan()
-        medscan.patientID = os.path.basename(nifti_file).split("_")[0]
-        medscan.type = os.path.basename(nifti_file).split(".")[-3]
-        medscan.series_description = nifti_file.name[nifti_file.name.find('__') + 2: nifti_file.name.find('(')]
+        patient_id, scan_name, _, modality = parse_nifti_name(nifti_file)
+        medscan.patientID = patient_id
+        medscan.type = modality
+        medscan.series_description = scan_name
         medscan.format = "nifti"
         medscan.data.set_orientation(orientation="Axial")
         medscan.data.set_patient_position(patient_position="HFS")
@@ -686,10 +688,12 @@ class DataManager(object):
             None
         """
         if not (path_csv or self.paths._path_csv):
-            print('No csv provided, no updates will be made')
+            print('No csv provided, the summary will not be broken down by ROI type')
+            self.csv_data = None
+            self.summarize()
         else:
             if path_csv:
-                self.paths._path_csv = path_csv
+                self.paths._path_csv = Path(path_csv)
             # Extract roi type label from csv file name
             name_csv = self.paths._path_csv.name
             roi_type_label = name_csv[name_csv.find('_')+1 : name_csv.find('.')]
@@ -1092,7 +1096,8 @@ class DataManager(object):
                 that will be analyzed. You can learn more about wildcards in
                 :ref:`this link <https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html>`.
             path_csv(Union[str, Path], optional): Path to a csv file containing a list of the scans that will be
-                analyzed (a CSV file for a single ROI type).
+                analyzed (a CSV file for a single ROI type). If not given, all the scans found in
+                ``path_data`` are analyzed, using the union of all the ROIs of each scan.
             min_percentile (float, optional): Minimum percentile to use for the histograms. Defaults to 0.05.
             max_percentile (float, optional): Maximum percentile to use for the histograms. Defaults to 0.95.
             bin_width(int, optional): Width of the bins for the histograms. If not provided, will use the 
@@ -1119,12 +1124,21 @@ class DataManager(object):
 
         if len(wildcards_window) == 0:
             raise ValueError("Wildcard is empty, the pre-checks will be aborted")
+        # The ROI CSV file is optional. Without it, all the scans found in the given path
+        # are analyzed, using the union of all the ROIs of each scan.
         if path_csv is not None:
             self.paths._path_csv = Path(path_csv)
-        elif self.paths._path_csv is None:
-            raise ValueError("Cannot run pre-radiomics windows checks, please provide a csv file containing the list of scans to " \
-            "analyze or set the path_csv attribute in the class.")
-        roi_table = pd.read_csv(self.paths._path_csv)
+        roi_table = None
+        if self.paths._path_csv is not None:
+            roi_table = pd.read_csv(self.paths._path_csv)
+            for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
+                if col not in list(roi_table.columns):
+                    raise ValueError(
+                        f'Missing column "{col}" in the ROI CSV file: {self.paths._path_csv}. Please check '
+                        'that the CSV file contains all the required columns: "PatientID", '
+                        '"ImagingScanName", "ImagingModality" and "ROIname".')
+        else:
+            print("No ROI CSV file given, the union of all the ROIs of each scan will be used.")
         for w in range(len(wildcards_window)):
             temp_val = []
             temp = []
@@ -1148,29 +1162,36 @@ class DataManager(object):
             n_files = len(file_paths)
             i = 0
             for f in tqdm(range(len(file_paths))):
+                patient_id = sequence = modality = None
                 try:
                     medscan = self.__load_medscan_for_pre_radiomics_checks(
                         file_paths[f], path_data, use_dicoms, use_niftis
                     )
                     if medscan is None:
                         continue
-                    
+
                     # Compute SUV map if it's a PET scan without SUV values
                     if compute_suv_map:
                         suv_converter = PETSUVConverter(medscan.dicomH)
                         medscan.data.volume.array = suv_converter.compute(np.double(medscan.data.volume.array))
 
-                    # Extract ROI values according to csv file
                     patient_id, sequence, modality = medscan.patientID, medscan.series_description, medscan.type
-                    name_roi = roi_table[(roi_table['PatientID'] == patient_id) & 
-                                         (roi_table['ImagingScanName'] == sequence) & 
-                                         (roi_table['ImagingModality'] == modality)
-                                        ]['ROIname'].values
-                    if len(name_roi) == 0:
-                        print(f"No ROI found for patient {patient_id} with sequence {sequence} and modality {modality} in the csv file, skipping this scan.")
-                        continue
 
-                    name_roi = name_roi[0]
+                    if roi_table is not None:
+                        # Extract ROI values according to csv file
+                        name_roi = roi_table[(roi_table['PatientID'] == patient_id) &
+                                             (roi_table['ImagingScanName'] == sequence) &
+                                             (roi_table['ImagingModality'] == modality)
+                                            ]['ROIname'].values
+                        if len(name_roi) == 0:
+                            print(f"No ROI found for patient {patient_id} with sequence {sequence} and modality {modality} in the csv file, skipping this scan.")
+                            continue
+
+                        name_roi = name_roi[0]
+                    else:
+                        # No csv file, the union of all the ROIs of the scan is used
+                        name_roi = None
+
                     vol_obj_init, roi_obj_init = get_roi_from_indexes(medscan, name_roi, 'box')
                     temp = vol_obj_init.data[roi_obj_init.data == 1]
                     temp_val.append(len(temp))
@@ -1183,6 +1204,11 @@ class DataManager(object):
                 except Exception as e:
                     print(f"Problem with patient {patient_id}, error: {e}")
             
+            if not len(roi_data["data"]):
+                print(f"No ROI data could be extracted for the wildcard '{wildcard}', "
+                      "skipping this window check.")
+                continue
+
             roi_data["data"] = np.concatenate(roi_data["data"])
             roi_data["mean"] = np.mean(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["median"] = np.median(roi_data["data"][~np.isnan(roi_data["data"])])
@@ -1318,7 +1344,8 @@ class DataManager(object):
                 that will be analyzed. You can learn more about wildcards in
                 `this link <https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html>`_.
             path_csv(Union[str, Path], optional): Path to a csv file containing a list of the scans that will be
-                analyzed (a CSV file for a single ROI type).
+                analyzed (a CSV file for a single ROI type). If not given, all the scans found in
+                ``path_data`` are analyzed, using the union of all the ROIs of each scan.
             min_percentile (float, optional): Minimum percentile to use for the histograms. Defaults to 0.05.
             max_percentile (float, optional): Maximum percentile to use for the histograms. Defaults to 0.95.
             bin_width(int, optional): Width of the bins for the histograms. If not provided, will use the 

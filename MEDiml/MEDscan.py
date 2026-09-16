@@ -13,6 +13,7 @@ from PIL import Image
 from .utils.image_volume_obj import image_volume_obj
 from .utils.imref import imref3d
 from .utils.json_utils import load_json
+from .utils.parse_nifti_name import is_nifti_file, is_roi_file, parse_nifti_name
 
 
 class MEDscan(object):
@@ -1633,8 +1634,10 @@ class MEDscan(object):
                 """
                 self.indexes = indexes if indexes else {}
                 self.roi_names = roi_names if roi_names else {}
-                self.nameSet = roi_names if roi_names else {}
-                self.nameSetInfo = roi_names if roi_names else {}
+                # Copied (and not aliased) so that updating one of these dicts can
+                # never corrupt `roi_names`.
+                self.nameSet = dict(roi_names) if roi_names else {}
+                self.nameSetInfo = dict(roi_names) if roi_names else {}
 
             def get_indexes(self, key):
                 if not self.indexes or key is None:
@@ -1659,6 +1662,93 @@ class MEDscan(object):
                     return {}
                 else:
                     return self.nameSetInfo[str(key)]
+
+            @staticmethod
+            def _indexes_are_valid(indexes) -> bool:
+                """Checks that the given indexes hold at least one usable voxel index.
+
+                A failed DICOM rasterization is recorded as ``np.NaN``, so such ROIs must
+                never be picked up by ``get_roi_names()``.
+
+                Args:
+                    indexes: Value stored in the ``indexes`` dict for one ROI.
+
+                Returns:
+                    bool: True if the indexes can be used to rebuild a mask.
+                """
+                if indexes is None:
+                    return False
+                try:
+                    if np.ndim(indexes) == 0:
+                        # Scalar value: np.NaN or a 0-d array.
+                        return bool(np.size(indexes)) and not np.isnan(indexes)
+                    return np.size(indexes) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            def get_roi_names(self, exclude_invalid: bool = True) -> List[str]:
+                """Lists the names of the ROIs available in the scan.
+
+                Names are ordered by their integer key, which is the order used by
+                ``MEDscan.data.get_indexes_by_roi_name()`` (it resolves a name to a
+                positional index in ``roi_names``), so the two stay consistent.
+
+                Args:
+                    exclude_invalid (bool, optional): If True, skips the ROIs whose indexes
+                        are missing, NaN or empty. Defaults to True.
+
+                Returns:
+                    List[str]: Ordered list of the ROI names, without duplicates.
+
+                Examples:
+                    >>> medscan.data.ROI.get_roi_names()
+                    ['ET', 'ED', 'NET']
+                """
+                if not self.roi_names:
+                    return []
+
+                def sort_key(key):
+                    # Keys are stringified integers, so they must be sorted numerically
+                    # ('10' comes after '2') with a fallback for non-numeric keys.
+                    try:
+                        return (0, int(key))
+                    except (TypeError, ValueError):
+                        return (1, str(key))
+
+                roi_names = []
+                for key in sorted(self.roi_names.keys(), key=sort_key):
+                    roi_name = self.roi_names[key]
+                    if not isinstance(roi_name, str) or not roi_name.strip():
+                        continue
+                    # `self.indexes.get()` is used instead of `self.get_indexes()` since the
+                    # latter raises a KeyError for a name that has no indexes associated.
+                    if exclude_invalid and not self._indexes_are_valid(self.indexes.get(str(key))):
+                        continue
+                    if roi_name not in roi_names:
+                        roi_names += [roi_name]
+
+                return roi_names
+
+            def get_union_roi_name(self, exclude_invalid: bool = True) -> str:
+                """Builds the ROI name that unions every ROI available in the scan.
+
+                The returned name follows the MEDiml convention and can be passed to
+                ``MEDiml.processing.get_roi_from_indexes()``.
+
+                Args:
+                    exclude_invalid (bool, optional): If True, skips the ROIs whose indexes
+                        are missing, NaN or empty. Defaults to True.
+
+                Returns:
+                    str: The union of all the ROI names, empty if the scan has no valid ROI.
+
+                Examples:
+                    >>> medscan.data.ROI.get_union_roi_name()
+                    '{ET}+{ED}+{NET}'
+                """
+                return '+'.join(
+                    '{' + roi_name + '}' for roi_name in self.get_roi_names(exclude_invalid)
+                )
 
             def update_indexes(self, key, indexes):
                 try: 
@@ -1704,10 +1794,14 @@ class MEDscan(object):
                 """Extracts all ROI data from the given path for the given
                 patient ID and updates all class attributes with the new extracted data.
 
+                Note:
+                    The given path is searched recursively, and both the ".nii" and the
+                    ".nii.gz" extensions are supported.
+
                 Args:
                     roi_path(Union[Path, str]): Path where the ROI data is stored.
                     id(str): ID containing patient ID and the modality type, to identify the right file.
-                
+
                 Returns:
                     None.
                 """
@@ -1716,15 +1810,16 @@ class MEDscan(object):
                 self.nameSet = {}
                 self.nameSetInfo = {}
                 roi_index = 0
-                list_of_patients = os.listdir(roi_path)
 
-                for file in list_of_patients:
+                # Sorted so that the ROI indexes are stable from one run to the next.
+                list_of_files = sorted(Path(roi_path).rglob('*.nii*'))
+
+                for file in list_of_files:
                     # Load the patient's ROI nifti files :
-                    if file.startswith(id) and file.endswith('nii.gz') and 'ROI' in file.split("."):
-                        roi = nib.load(roi_path + "/" + file)
+                    if file.name.startswith(id) and is_nifti_file(file) and is_roi_file(file):
+                        roi = nib.load(file)
                         roi_data = self.convert_to_LPS(data=roi.get_fdata())
-                        roi_name = file[file.find("(")+1 : file.find(")")]
-                        name_set = file[file.find("_")+2 : file.find("(")]
+                        _, name_set, roi_name, _ = parse_nifti_name(file)
                         self.update_indexes(key=roi_index, indexes=np.nonzero(roi_data.flatten()))
                         self.update_name_set(key=roi_index, name_set=name_set)
                         self.update_roi_name(key=roi_index, roi_name=roi_name)

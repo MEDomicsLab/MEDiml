@@ -14,15 +14,16 @@
 ## Table of Contents
   * [1. Introduction](#1-introduction)
   * [2. Installation](#2-installation)
-  * [3. Generating the documentation locally](#3-generating-the-documentation-locally)
-  * [4. A simple example](#4-a-simple-example)
-  * [5. Tutorials](#5-tutorials)
-  * [6. IBSI Standardization](#6-ibsi-standardization)
+  * [3. Using MEDiml](#3-using-mediml)
+    * [3.1 Using MEDiml through the command line](#31-using-mediml-through-the-command-line)
+    * [3.2 Using MEDiml through code](#32-using-mediml-through-code)
+  * [4. Tutorials](#4-tutorials)
+  * [5. IBSI Standardization](#5-ibsi-standardization)
     * [IBSI Chapter 1](#ibsi-chapter-1)
     * [IBSI Chapter 2](#ibsi-chapter-2)
-  * [7. Acknowledgement](#7-acknowledgement)
-  * [8. Authors](#8-authors)
-  * [9. Statement](#9-statement)
+  * [6. Acknowledgement](#6-acknowledgement)
+  * [7. Authors](#7-authors)
+  * [8. Statement](#8-statement)
 
 ## 1. Introduction
 MEDiml is an open-source Python package that can be used for processing multi-modal medical images (MRI, CT or PET) and for extracting their radiomic features. This package is meant to facilitate the processing of medical images and the subsequent computation of all types of radiomic features while maintaining the reproducibility of analyses. This package has been standardized with the [IBSI](https://theibsi.github.io/) norms.
@@ -43,34 +44,30 @@ pip install MEDiml
 
 For more installation options (Conda, Poetry...) check out the [installation documentation](https://mediml.readthedocs.io/en/latest/Installation.html).
 
-### Radiomics command line for NIfTI and DICOM files
+## 3. Using MEDiml
+MEDiml can be used either as a command line tool for batch radiomics extraction, or as a Python package that you import directly into your own scripts and notebooks for finer-grained control over the processing and feature extraction pipeline.
+
+### 3.1 Using MEDiml through the command line
 After installation, you can launch radiomics extraction directly from the terminal:
 
 ```bash
-radiomics <path/to/input> <path/to/csv_file> <path/to/settings_file> <path/save> --use-niftis --n-batch 4 --skip-existing
+radiomics <path/to/input> <path/to/settings_file> <path/save> --use-niftis --n-batch 4 --skip-existing
+```
+
+By default, every scan found in the input folder is processed, and all the ROIs of a scan are
+combined into a single region (i.e. `{ROI_1}+{ROI_2}`). To process a specific list of scans and
+ROIs instead, pass a [CSV file](https://mediml.readthedocs.io/en/latest/csv_file.html) with the
+optional `--path-csv` argument:
+
+```bash
+radiomics <path/to/input> <path/to/settings_file> <path/save> --path-csv <path/to/csv_file>
 ```
 
 For DICOM format, use `--use-dicoms` instead of `--use-niftis`.
 
 The command wraps the existing `BatchExtractor` workflow and selects the appropriate input format automatically.
 
-## 3. Generating the documentation locally
-The [documentation](https://mediml.readthedocs.io/en/latest/) of the MEDiml package was created using Sphinx. However, you can generate and host it locally by compiling the documentation source code using :
-
-```
-cd docs
-make clean
-make html
-```
-
-Then open it locally using:
-
-```
-cd _build/html
-python -m http.server
-```
-
-## 4. A simple example
+### 3.2 Using MEDiml through code
 ```python
 import os
 import pickle
@@ -83,7 +80,8 @@ dm = MEDiml.DataManager(path_dicoms=os.getcwd())
 # Process the DICOM files and retrieve the MEDiml object
 med_obj = dm.process_all_dicoms()[0]
 
-# Extract ROI mask from the object
+# Extract ROI mask from the object. `name_roi` is optional: when it is omitted,
+# the union of all the ROIs found in the object is used.
 vol_obj_init, roi_obj_init = MEDiml.processing.get_roi_from_indexes(
             med_obj,
             name_roi='{ED}+{ET}+{NET}',
@@ -108,11 +106,11 @@ med_obj.save_radiomics(
             )
 ```
 
-## 5. Tutorials
+## 4. Tutorials
 
 We have created many [tutorial notebooks](https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks) to assist you in learning how to use the different parts of the package. More details can be found in the [documentation](https://mediml.readthedocs.io/en/latest/tutorials.html).
 
-## 6. IBSI Standardization
+## 5. IBSI Standardization
 The image biomarker standardization initiative ([IBSI](https://theibsi.github.io)) is an independent international collaboration that aims to standardize the extraction of image biomarkers from acquired imaging. The IBSI therefore seeks to provide image biomarker nomenclature and definitions, benchmark datasets, and benchmark values to verify image processing and image biomarker calculations, as well as reporting guidelines, for high-throughput image analysis. We participate in this collaboration with our package to make sure it respects international nomenclatures and definitions. The participation was separated into two chapters:
 
   - ### IBSI Chapter 1
@@ -127,23 +125,18 @@ The image biomarker standardization initiative ([IBSI](https://theibsi.github.io
       - **Phase 1**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi2p1.ipynb)
       - **Phase 2**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi2p2.ipynb)
 
-      Our team at *UdeS* (a.k.a. Université de Sherbrooke) has already submitted the benchmarked values to the [IBSI uploading website](https://ibsi.radiomics.hevs.ch/).
+      Our team named *UdeS* (a.k.a. Université de Sherbrooke) has already submitted the benchmarked values to the [IBSI uploading website](https://ibsi.radiomics.hevs.ch/).
 
 ---
 **Miscellaneous**
 
-You can avoid the next steps (Jupyter installation and environment setup) if you installed the package using Conda or Poetry according to the documentation.
+You can avoid the next steps (Jupyter installation) if you already have a Jupyter Notebook setup available.
 
 ---
 
 You can view and run the tests locally by installing the [Jupyter Notebook](https://jupyter.org/) application on your machine:
 ```
 python -m pip install jupyter
-```
-Then add the installed `MEDiml` environment to the Jupyter Notebook kernels using:
-
-```
-python -m ipykernel install --user --name=MEDiml
 ```
 
 Then access the IBSI tests folder using:
@@ -158,14 +151,20 @@ Finally, launch Jupyter Notebook to navigate through the IBSI notebooks using:
 jupyter notebook
 ```
 
-## 7. Acknowledgement
+Make sure to run the notebooks with a Jupyter kernel that has `MEDiml` installed. If that's not the case, you can simply install it from within the notebook by running the following in a code cell:
+
+```
+! pip install MEDiml
+```
+
+## 6. Acknowledgement
 MEDiml is an open-source package developed at the [MEDomicsLab](https://www.medomicslab.com/en/) laboratory with the collaboration of the international consortium [MEDomics](https://www.medomics.ai/). We welcome any contribution and feedback. Furthermore, we wish that this package could serve the growing radiomics research community by providing a flexible as well as [IBSI](https://theibsi.github.io/) standardized tool to reimplement existing methods and develop new ones.
 
-## 8. Authors
+## 7. Authors
 * [MEDomicsLab](https://www.medomicslab.com/en/): Research laboratory at Université de Sherbrooke & McGill University.
 * [MEDomics](https://github.com/medomics/): MEDomics consortium.
 
-## 9. Statement
+## 8. Statement
 
 This package is part of https://github.com/medomics, a package providing research utility tools for developing precision medicine applications.
 

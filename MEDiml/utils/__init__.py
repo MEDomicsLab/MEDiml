@@ -19,6 +19,7 @@ from .interp3 import *
 from .json_utils import *
 from .mode import *
 from .parse_contour_string import *
+from .parse_nifti_name import *
 from .save_MEDscan import *
 from .strfind import *
 from .textureTools import *

@@ -16,6 +16,7 @@ import ray
 from tqdm import trange
 
 import MEDiml
+from MEDiml.biomarkers.BatchExtractor import DEFAULT_ROI_TYPE, DEFAULT_ROI_TYPE_LABEL
 
 
 class BatchExtractorTexturalFilters(object):
@@ -74,9 +75,19 @@ class BatchExtractorTexturalFilters(object):
         # Load json parameters
         im_params = MEDiml.utils.json_utils.load_json(self._path_params)
         
+        # The roi types are only used to name the saved features, so they are optional.
+        roi_types = im_params.get('roi_types') or [DEFAULT_ROI_TYPE]
+        roi_type_labels = im_params.get('roi_type_labels') or [DEFAULT_ROI_TYPE_LABEL]
+
+        if len(roi_types) != len(roi_type_labels):
+            raise ValueError(
+                f'"roi_types" ({len(roi_types)} entries) and "roi_type_labels" '
+                f'({len(roi_type_labels)} entries) must have the same number of entries in the '
+                'parameters JSON file.')
+
         # Update class attributes
-        self.roi_types.extend(im_params['roi_types'])
-        self.roi_type_labels.extend(im_params['roi_type_labels'])
+        self.roi_types.extend(roi_types)
+        self.roi_type_labels.extend(roi_type_labels)
         self.n_bacth = im_params['n_batch'] if 'n_batch' in im_params else self.n_bacth
 
         return im_params

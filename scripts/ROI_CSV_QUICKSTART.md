@@ -1,5 +1,10 @@
 # Quick Start: ROI CSV Generator
 
+> **This step is optional.** MEDiml processes every scan found in a dataset folder by default,
+> combining all the ROIs of a scan into a single region (`{ROI_1}+{ROI_2}`). Generate a CSV file
+> only when you want to analyze a specific subset of the scans, or a specific ROI (or combination
+> of ROIs) of each scan.
+
 ## 1️⃣ Installation
 
 ```bash
