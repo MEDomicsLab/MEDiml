@@ -63,9 +63,18 @@ optional `--path-csv` argument:
 radiomics <path/to/input> <path/to/settings_file> <path/save> --path-csv <path/to/csv_file>
 ```
 
-For DICOM format, use `--use-dicoms` instead of `--use-niftis`.
+The command wraps the existing `BatchExtractor` workflow and selects the appropriate input format automatically. The full list of arguments, required ones first, is described below:
 
-The command wraps the existing `BatchExtractor` workflow and selects the appropriate input format automatically.
+| Argument | Required | Description |
+| --- | --- | --- |
+| `path_input` | Yes | Path to the [input dataset](https://mediml.readthedocs.io/en/latest/input_data.html) folder containing the scans to process. |
+| `path_settings` | Yes | Path to the radiomics [extraction settings file](https://mediml.readthedocs.io/en/latest/configurations_file.html#features-extraction). |
+| `path_save` | Yes | Path to the folder where the extracted feature files will be written. |
+| `--path-csv` | No | Path to a [CSV file](https://mediml.readthedocs.io/en/latest/csv_file.html) mapping specific scans to specific ROIs (columns: `PatientID`, `ImagingScanName`, `ImagingModality`, `ROIname`). If omitted, every scan found in the input folder is processed and all of its ROIs are combined into a single region. |
+| `--use-niftis` | No | Process NIfTI files instead of DICOM files. This is the default behavior and is mutually exclusive with `--use-dicoms`. |
+| `--use-dicoms` | No | Process DICOM files instead of NIfTI files. Mutually exclusive with `--use-niftis`. |
+| `--n-batch` | No | Number of CPU cores to use for extraction. Defaults to `4`. |
+| `--skip-existing` | No | Skip scans whose features already exist in the output folder. |
 
 ### 3.2 Using MEDiml through code
 ```python
