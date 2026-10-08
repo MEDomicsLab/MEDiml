@@ -53,7 +53,9 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
 
         # This will hold the "model_info" dictionary result
         self.model_info_ = None
+        self.pipeline_ = None
         self.classifier_ = None
+        self.input_features_ = None
         self.selected_features_ = None
         self.selected_features_definitions_ = None
 
@@ -66,9 +68,12 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
             y = pd.DataFrame(y)
 
         with self._logging_to_file():
-            results, self.classifier_ = self._train_logic(X, y)
+            results, self.pipeline_ = self._train_logic(X, y)
 
+        # The final estimator of the pipeline (used e.g. for feature importances)
+        self.classifier_ = self.pipeline_.steps[-1][1]
         self.model_info_ = results
+        self.input_features_ = results['input_var_names']
         self.selected_features_ = results['var_names']
         self.selected_features_definitions_ = results.get('var_def')
         self.classes_ = np.unique(y)
@@ -76,7 +81,7 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         return self
 
     def predict(self, X):
-        if self.classifier_ is None:
+        if self.pipeline_ is None:
             raise ValueError("Model has not been fitted yet.")
 
         probas = self.predict_proba(X)
@@ -87,9 +92,8 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
 
-        # Filter X to include only features selected during fit
-        X_filtered = X[self.selected_features_]
-        return self.classifier_.predict_proba(X_filtered)[:, 1]
+        # The PyCaret pipeline (preprocessing + feature selection + model) expects all training input features
+        return self.pipeline_.predict_proba(X[self.input_features_])[:, 1]
 
     @contextmanager
     def _logging_to_file(self):
@@ -210,18 +214,26 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
             logger.info(f"{' ' * 8}...Model has no predict_proba, calibrating probabilities")
             classifier = calibrate_model(classifier, verbose=False)
 
-        # PyCaret fits models on its internal train split only (train_size=0.7 by default),
-        # so the tuned model is re-fitted on all the given training data (selected features)
-        selected_features = list(classifier.feature_names_in_)
-        X_selected = var_table_train[selected_features]
+        # PyCaret fits models on its internal train split only (train_size=0.7 by default), so the whole
+        # tuned pipeline (preprocessing, feature selection and model) is re-fitted on all the given training data.
+        # The same pipeline is then used for predictions, so test data goes through the exact same steps.
+        input_features = list(var_table_train.columns)
+        X_train = var_table_train[input_features]
         y_train = outcome_table_binary_train.iloc[:, 0]
-        logger.info(f"{' ' * 8}...Selected features ({len(selected_features)}): {selected_features}")
 
-        # Find threshold (on out-of-fold predictions, before the final refit)
+        tstart = time.time()
+        pipeline = finalize_model(classifier)
+        classifier = pipeline.steps[-1][1]
+        selected_features = list(classifier.feature_names_in_)
+        logger.info(f"{' ' * 8}...Selected features ({len(selected_features)}): {selected_features}")
+        logger.info(f"{' ' * 8}...Final fit on all {X_train.shape[0]} training patients "
+                    f"done in {time.time() - tstart:.2f} sec")
+
+        # Find threshold (on out-of-fold predictions of the full pipeline)
         if self.optimize_threshold:
             tstart = time.time()
             try:
-                threshold = self.__find_balanced_threshold(classifier, X_selected, y_train)
+                threshold = self.__find_balanced_threshold(pipeline, X_train, y_train)
                 logger.info(f"{' ' * 8}...Optimized decision threshold: {threshold:.4f} "
                             f"(done in {time.time() - tstart:.2f} sec)")
             except Exception as e:
@@ -230,11 +242,6 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         else:
             threshold = 0.5
             logger.info(f"{' ' * 8}...Threshold optimization disabled, using 0.5")
-
-        tstart = time.time()
-        classifier = clone(classifier).fit(X_selected, y_train)
-        logger.info(f"{' ' * 8}...Final fit on all {X_selected.shape[0]} training patients "
-                    f"done in {time.time() - tstart:.2f} sec")
 
         # Saving the information of the model in a dictionary
         model_info = dict()
@@ -246,10 +253,11 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         user_data = var_table_train.Properties.get('userData', {}) if hasattr(var_table_train, 'Properties') else {}
         model_info['var_info'] = deepcopy(user_data)
         model_info['var_def'] = deepcopy(user_data.get('variables', {}).get('var_def'))
-        model_info['var_names'] = list(classifier.feature_names_in_)
+        model_info['input_var_names'] = input_features
+        model_info['var_names'] = selected_features
         model_info['optimization'] = self.__make_json_safe(classifier.get_params())
 
-        return model_info, classifier
+        return model_info, pipeline
 
     @staticmethod
     def __make_json_safe(value):

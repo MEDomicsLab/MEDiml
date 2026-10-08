@@ -15,7 +15,7 @@ from MEDiml.learning.Estimator import Estimator
 from MEDiml.learning.FSR import FSR
 from MEDiml.learning.ml_utils import (average_results, combine_rad_tables,
                                       feature_importance_analysis,
-                                      find_best_model, get_ml_test_table,
+                                      get_ml_test_table,
                                       get_radiomics_table, intersect)
 from MEDiml.learning.Normalization import CombatNormalization
 from MEDiml.learning.Results import Results
@@ -73,36 +73,6 @@ class RadiomicsLearner:
         ml_dict['path_results'] = ml_dict_paths['results']
 
         return ml_dict
-    
-    def get_hold_out_set_table(self, ml: Dict, var_id: str, patients_id: List):
-        """
-        Loads and pre-processes different radiomics tables then combines them to be used for hold-out testing.
-
-        Args:
-            ml (Dict): The machine learning dictionary containing the information of the machine learning test.
-            var_id (str): String specifying the ID of the radiomics variable in ml.
-                --> Ex: var1
-            patients_id (List): List of patients of the hold-out set.
-
-        Returns:
-            pd.DataFrame: Radiomics table for the hold-out set.
-        """
-        # Loading and pre-processing
-        rad_var_struct = ml['variables'][var_id]
-        rad_tables_holdout = list()
-        for item in rad_var_struct['path'].values():
-            # Reading the table
-            path_radiomics_csv = item['csv']
-            path_radiomics_txt = item['txt']
-            image_type = item['type']
-            rad_table_holdout = get_radiomics_table(path_radiomics_csv, path_radiomics_txt, image_type, patients_id)
-            rad_tables_holdout.append(rad_table_holdout)
-        
-        # Combine the tables
-        rad_tables_holdout = combine_rad_tables(rad_tables_holdout)
-        rad_tables_holdout.Properties['userData']['flags_processing'] = {}
-
-        return rad_tables_holdout
 
     def pre_process_radiomics_table(
             self, 
@@ -152,13 +122,23 @@ class RadiomicsLearner:
             # Data cleaning
             if flags_preprocessing['cleaning_profile']:
                 cleaning_dict = ml['datacleaning'][ml['variables'][var_id]['cleaning_profile']]['continuous']
+                if 'random_state' not in cleaning_dict:
+                    cleaning_dict = {**cleaning_dict, 'random_state': ml.get('modeling', {}).get('seed')}
                 data_cleaner = DataCleaner(**cleaning_dict)
 
                 # Temp save of properties
                 temp_properties = deepcopy(rad_table_learning.Properties)
 
-                # Apply data cleaning
-                rad_table_learning = data_cleaner.fit_transform(rad_table_learning)
+                # Apply data cleaning (fitted on training patients only to avoid leakage)
+                data_cleaner.fit(rad_table_learning.loc[intersect(patients_train, list(rad_table_learning.index))])
+                rad_table_learning = data_cleaner.transform(rad_table_learning)
+                if data_cleaner.dropped_samples_:
+                    n_dropped_train = len(intersect(data_cleaner.dropped_samples_, patients_train))
+                    logging.warning(
+                        f"...Data cleaning ({image_type}): {len(data_cleaner.dropped_samples_)} patients removed for too many "
+                        f"missing features ({n_dropped_train} training, {len(data_cleaner.dropped_samples_) - n_dropped_train} "
+                        f"test/holdout): {data_cleaner.dropped_samples_}"
+                    )
 
                 # Re-assign properties
                 rad_table_learning.Properties = temp_properties
@@ -182,9 +162,12 @@ class RadiomicsLearner:
                         data_cln_method = ml['variables'][var_id]['cleaning_profile']
                         rad_table_learning.Properties['userData']['normalization']['original_data']['datacleaning_method'] = data_cln_method
 
-                    # Apply ComBat
+                    # Apply ComBat (estimated on training patients only, applied to all)
+                    temp_properties = deepcopy(rad_table_learning.Properties)
                     normalization = CombatNormalization()
-                    rad_table_learning = normalization.fit_transform(rad_table_learning)  # Training data
+                    normalization.fit(rad_table_learning.loc[intersect(patients_train, list(rad_table_learning.index))])
+                    rad_table_learning = normalization.transform(rad_table_learning)
+                    rad_table_learning.Properties = temp_properties
                 else:
                     raise NotImplementedError(f'Normalization method: {normalization_method} not recognized.')
 
@@ -222,11 +205,63 @@ class RadiomicsLearner:
         del temp_properties
         
         # Finalization steps
+        if isinstance(rad_tables_training, list):
+            rad_tables_training = combine_rad_tables(rad_tables_training)
         rad_tables_training.Properties['userData']['flags_preprocessing'] = flags_preprocessing
         rad_tables_testing = combine_rad_tables(rad_tables_testing)
         rad_tables_testing.Properties['userData']['flags_processing'] = flags_preprocessing_test
 
         return rad_tables_training, rad_tables_testing
+
+    @staticmethod
+    def _log_excluded_patients(set_name: str, patients_before: List, patients_after: List) -> None:
+        """
+        Logs the patients of an evaluation set that were excluded (e.g. no outcome, no radiomics data
+        or removed by data cleaning), since the metrics are then computed on the remaining patients only.
+
+        Args:
+            set_name (str): Name of the evaluation set (e.g. 'test', 'holdout').
+            patients_before (List): Patients of the set before pre-processing.
+            patients_after (List): Patients of the set that remain for evaluation.
+
+        Returns:
+            None.
+        """
+        excluded = [patient for patient in patients_before if patient not in set(patients_after)]
+        if excluded:
+            logging.warning(
+                f"...{len(excluded)}/{len(patients_before)} {set_name} patients excluded from evaluation: {excluded}"
+            )
+
+    @staticmethod
+    def _build_estimator(ml: Dict, log_file: Path = None) -> Estimator:
+        """
+        Creates an (unfitted) Estimator from the "modeling" section of the ml dictionary.
+
+        Args:
+            ml (Dict): The machine learning dictionary.
+            model (str, optional): Model ID used if the ml dictionary has no "method" key in "modeling".
+            log_file (Path, optional): Log file of the current split/run, used by the estimator
+                to log its training steps.
+
+        Returns:
+            Estimator: The unfitted estimator.
+        """
+        modeling = ml['modeling']
+        return Estimator(
+            log_file=log_file,
+            algorithm=modeling['method'] if 'method' in modeling.keys() else 'best',
+            ml_config={
+            'n_features_to_select': modeling['n_features_to_select'],
+            'optimize_threshold': modeling['optimize_threshold'],
+            'optimization_metric': modeling['optimization_metric'],
+            'use_gpu': modeling['useGPU'] if 'useGPU' in modeling.keys() else True,
+            'seed': modeling['seed'] if 'seed' in modeling.keys() else None,
+            'feature_selection_estimator': modeling.get('feature_selection_estimator', 'lightgbm'),
+            'create_model_kwargs': modeling.get('create_model_kwargs'),
+            'best_include': modeling.get('best_include'),
+            'best_exclude': modeling.get('best_exclude')
+        })
 
     def ml_run(self, path_ml: Path, holdout_test: bool = True, model: str = 'xgboost') -> None:
         """
@@ -244,7 +279,7 @@ class RadiomicsLearner:
         """
         # Set up logging file for the batch
         log_file = os.path.dirname(path_ml) + '/batch.log'
-        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s', filemode='w')
+        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s', filemode='w', force=True)
 
         # Start the timer
         batch_start = time.time()
@@ -287,6 +322,8 @@ class RadiomicsLearner:
         patient_ids = list(outcome_table_binary.index)
         patients_train = intersect(intersect(patient_ids, patients_train), processed_training_table.index)
         patients_test = intersect(intersect(patient_ids, patients_test), processed_testing_table.index)
+        self._log_excluded_patients('test', ml_info_dict['patientsTest'], patients_test)
+        patients_holdout_all = patients_holdout
         patients_holdout = intersect(patient_ids, patients_holdout) if holdout_test else None
 
         # Initializing outcome tables for training and test sets
@@ -297,32 +334,12 @@ class RadiomicsLearner:
         # Serperate variable table for training sets (repetitive but double-checking)
         var_table_train = processed_training_table.loc[patients_train, :]
 
-        # Initializing the model settings
-        algorithm = ml['modeling']['method'] if 'method' in ml['modeling'].keys() else model
-        n_features_to_select = ml['modeling']['n_features_to_select']
-        optimize_threshold = ml['modeling']['optimize_threshold']
-        optimization_metric = ml['modeling']['optimization_metric']
-        use_gpu = ml['modeling']['useGPU'] if 'useGPU' in ml['modeling'].keys() else True
-        seed = ml['modeling']['seed'] if 'seed' in ml['modeling'].keys() else None
-
         # B.2. Training the model
         tstart = time.time()
-        logging.info(f"\n\n--> TRAINING {algorithm.upper()} MODEL FOR VARIABLE {var_id}")
+        estimator = self._build_estimator(ml, log_file=log_file)
+        logging.info(f"\n\n--> TRAINING {estimator.algorithm.upper()} MODEL FOR VARIABLE {var_id}")
 
         # Training the model
-        estimator = Estimator(
-            algorithm=algorithm,
-            ml_config={
-            'n_features_to_select': n_features_to_select,
-            'optimize_threshold': optimize_threshold,
-            'optimization_metric': optimization_metric,
-            'use_gpu': use_gpu,
-            'seed': seed,
-            'feature_selection_estimator': ml['modeling'].get('feature_selection_estimator', 'lightgbm'),
-            'create_model_kwargs': ml['modeling'].get('create_model_kwargs'),
-            'best_include': ml['modeling'].get('best_include'),
-            'best_exclude': ml['modeling'].get('best_exclude')
-        })
         estimator.fit(var_table_train, outcome_table_binary_train)
 
         # Saving the trained model using pickle
@@ -336,7 +353,7 @@ class RadiomicsLearner:
         # --> C. Testing phase        
         # C.1. Testing the model and computing model response
         tstart = time.time()
-        logging.info(f"\n\n--> TESTING {algorithm.upper()} MODEL FOR VARIABLE {var_id}")
+        logging.info(f"\n\n--> TESTING {estimator.algorithm.upper()} MODEL FOR VARIABLE {var_id}")
 
         # Preparing the variable table
         var_table_test = get_ml_test_table(estimator, processed_testing_table)
@@ -349,14 +366,16 @@ class RadiomicsLearner:
         
         if holdout_test:
             # --> D. Holdoutset testing phase
-            # D.1. Prepare holdout test data
-            var_table_all_holdout = self.get_hold_out_set_table(ml, var_id, patients_holdout)
+            # D.1. Prepare holdout test data (same pre-processing as the training data)
+            patients_holdout = intersect(patients_holdout, list(var_table_test.index))
+            self._log_excluded_patients('holdout', patients_holdout_all, patients_holdout)
+            outcome_table_binary_holdout = outcome_table_binary.loc[patients_holdout, :]
 
             # D.2. Testing the model and computing model response on the holdout set
             tstart = time.time()
-            logging.info(f"\n\n--> TESTING {algorithm.upper()} MODEL FOR VARIABLE {var_id} ON THE HOLDOUT SET")
+            logging.info(f"\n\n--> TESTING {estimator.algorithm.upper()} MODEL FOR VARIABLE {var_id} ON THE HOLDOUT SET")
 
-            response_holdout = estimator.predict_proba(var_table_all_holdout.loc[patients_holdout, :])
+            response_holdout = estimator.predict_proba(var_table_test.loc[patients_holdout, :])
         
         logging.info('{}--> DONE. TOTAL TIME OF LEARNING PROCESS: {:.2f}'.format(" " * 4, (time.time() - tstart)/60))
         
@@ -407,22 +426,13 @@ class RadiomicsLearner:
         # Set up logging
         path_learn = self.path_study / f'learn__{self.experiment_label}'
         log_file = path_learn / 'final_model.log'
-        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s', filemode='w')
-        
+        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(message)s', filemode='w', force=True)
+
         batch_start = time.time()
         logging.info("\n\n********************FINAL MODEL TRAINING********************\n\n")
-        
+
         try:
-            # --> Phase 1: Find best model from splits
-            logging.info("--> PHASE 1: FINDING BEST MODEL FROM SPLITS")
-            tstart = time.time()
-            best_model, best_results_dict = find_best_model(path_learn, metric='AUC')
-            model_name = list(best_results_dict.keys())[0]
-            logging.info(f"...Best model found: {model_name}")
-            logging.info(f"...Test AUC: {best_results_dict[model_name]['test']['metrics']['AUC']:.4f}")
-            logging.info(f"...Done in {time.time()-tstart:.2f} sec")
-            
-            # --> Phase 2: Load data for full training
+            # --> Phase 1: Load data for full training
             logging.info("\n--> PHASE 2: LOADING DATA FOR FULL TRAINING SET")
             tstart = time.time()
             
@@ -444,9 +454,8 @@ class RadiomicsLearner:
             outcome_table_binary = outcome_table.iloc[:, [0]]
             
             # Filter to patients in learning set
-            all_patients = patients_final_train + (patients_holdout or [])
-            all_patients = intersect(all_patients, list(outcome_table_binary.index))
-            
+            patients_final_train = intersect(patients_final_train, list(outcome_table_binary.index))
+
             # Get ML configuration from one of the splits
             test_paths = list(path_learn.glob('test__*'))
             if not test_paths:
@@ -461,16 +470,17 @@ class RadiomicsLearner:
             logging.info(f"...Variable ID: {var_id}")
             logging.info(f"...Done in {time.time()-tstart:.2f} sec")
             
-            # --> Phase 3: Preprocess full training data
+            # --> Phase 2: Preprocess full training data
             logging.info("\n--> PHASE 3: PREPROCESSING FULL TRAINING DATA")
             tstart = time.time()
             
-            # Pre-process the full learning set with FSR re-fitted on all data
+            # Pre-process: cleaning, normalization and FSR are fitted on the learning set only,
+            # then applied to all patients (including the holdout set)
             processed_full_train, processed_holdout = self.pre_process_radiomics_table(
                 ml,
                 var_id,
                 outcome_table_binary.copy(),
-                all_patients  # All patients
+                patients_final_train
             )
             
             # Get intersection of patients that survived preprocessing
@@ -481,25 +491,25 @@ class RadiomicsLearner:
 
             # Apply the process to the holdout set if it exists
             if patients_holdout:
+                patients_holdout_all = patients_holdout
                 patients_holdout = intersect(patients_holdout, list(processed_holdout.index))
+                self._log_excluded_patients('holdout', patients_holdout_all, patients_holdout)
                 outcome_final_holdout = outcome_table_binary.loc[patients_holdout, :]
 
-            logging.info(f"...Learning set size: {len(patients_final_train)} patients")
-            logging.info(f"...Holdout set size: {len(patients_holdout)} patients")
-
             logging.info(f"...Preprocessed training set size: {len(patients_final_train)} patients")
-            logging.info(f"...Preprocessed holdout set size: {len(patients_holdout)} patients")
+            logging.info(f"...Preprocessed holdout set size: {len(patients_holdout or [])} patients")
             logging.info(f"...Final feature count: {processed_full_train.shape[1]}")
             logging.info(f"...Done in {time.time()-tstart:.2f} sec")
 
-            # --> Phase 4: Train final model
-            logging.info("\n--> PHASE 4: TRAINING FINAL MODEL ON FULL LEARNING SET")
+            # --> Phase 3: Train final model
+            logging.info("\n--> PHASE 3: TRAINING FINAL MODEL ON FULL LEARNING SET")
             tstart = time.time()
 
             # Prepare training data
             var_table_final_train = processed_full_train.loc[patients_final_train, :]
 
-            # Re-train the final model
+            # Train the final model from scratch (same modeling config as the splits)
+            best_model = self._build_estimator(ml, log_file=log_file)
             best_model.fit(var_table_final_train, outcome_final_train)
 
             # Save the final model
@@ -512,8 +522,8 @@ class RadiomicsLearner:
             logging.info(f"...Training time: {time.time()-tstart:.2f} sec")
 
             if patients_holdout:
-                # --> Phase 5: Evaluate on holdout set
-                logging.info("\n--> PHASE 5: EVALUATING FINAL MODEL ON HOLDOUT SET")
+                # --> Phase 4: Evaluate on holdout set
+                logging.info("\n--> PHASE 4: EVALUATING FINAL MODEL ON HOLDOUT SET")
                 tstart = time.time()
 
                 # Prepare holdout data with aligned features
@@ -526,8 +536,8 @@ class RadiomicsLearner:
                 logging.info(f"...Holdout predictions generated")
                 logging.info(f"...Done in {time.time()-tstart:.2f} sec")
 
-                # --> Phase 6: Compute and save results
-                logging.info("\n--> PHASE 6: COMPUTING PERFORMANCE METRICS")
+                # --> Phase 5: Compute and save results
+                logging.info("\n--> PHASE 5: COMPUTING PERFORMANCE METRICS")
                 tstart = time.time()
 
                 result = Results(best_model.estimator_.model_info_, model_id)
@@ -536,11 +546,11 @@ class RadiomicsLearner:
                     patients_holdout=patients_holdout,
                     outcome_table_binary_holdout=outcome_final_holdout
                 )
-                
+
                 # Save results
                 path_final_results = path_learn / 'final_model_results.json'
                 save_json(path_final_results, final_results, cls=NumpyEncoder)
-            
+
                 logging.info(f"...Results saved to {path_final_results}")
                 logging.info(f"...Holdout AUC: {final_results[model_id]['holdout']['metrics']['AUC']:.4f}")
                 logging.info(f"...Done in {time.time()-tstart:.2f} sec")
@@ -550,7 +560,7 @@ class RadiomicsLearner:
             logging.info('{} FINAL MODEL TRAINING COMPLETE'.format(" " * 13))
             logging.info('{} TOTAL COMPUTATION TIME: {:.2f} hours'.format(" " * 13, (time.time()-batch_start)/3600))
             logging.info("*********************************************************************")
-            
+
         except Exception as e:
             logging.error(f"\n\nERROR during final model training: {str(e)}", exc_info=True)
             raise ValueError(f"Final model training failed: {str(e)}")
@@ -580,7 +590,7 @@ class RadiomicsLearner:
         # Run the different machine learning tests for the experiment
         for run in tests_dict.keys():
             self.ml_run(tests_dict[run], holdout_test, model)
-        
+
         # Average results of the different splits/runs
         average_results(self.path_study / f'learn__{self.experiment_label}', save=True)
 

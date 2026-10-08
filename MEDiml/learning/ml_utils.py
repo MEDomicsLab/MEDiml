@@ -602,7 +602,9 @@ def get_ml_test_table(estimator: BaseEstimator, variable_table: pd.DataFrame) ->
     """
 
     # retrieve the necessary information from the variable table
-    var_names = estimator.estimator_.model_info_['var_names']
+    # (all input variables of the training table, since the model pipeline does its own feature selection)
+    model_info = estimator.estimator_.model_info_
+    var_names = model_info.get('input_var_names', model_info['var_names'])
     var_def = estimator.estimator_.model_info_['var_info']['variables']['var_def']
 
     # Get the full variable names for training
