@@ -119,13 +119,13 @@ class PETSUVConverter:
     @property
     def patient_weight_g(self) -> float:
         """Returns patient weight_kg in grams."""
-        if (0x0010, 0x1030) in self.dcm and float(self.dcm[0x0010, 0x1030].value) > 0:
+        if (0x0010, 0x1030) not in self.dcm:
+            raise KeyError("Patient Weight (0010,1030) is missing. Cannot compute SUV.")
+        elif float(self.dcm[0x0010, 0x1030].value) > 0:
             weight_kg = float(self.dcm[0x0010, 0x1030].value)
             return weight_kg * 1000.0
-        elif float(self.dcm[0x0010, 0x1030].value) == 0:
-            raise ValueError("Patient Weight (0010,1030) is zero. Cannot compute SUV.")
         else:
-            raise KeyError("Patient Weight (0010,1030) is missing. Cannot compute SUV.")
+            raise ValueError("Patient Weight (0010,1030) is zero or negative. Cannot compute SUV.")     
 
     @property
     def patient_height_cm(self) -> float:
@@ -288,7 +288,7 @@ class PETSUVConverter:
         else:
             cal_factor = self.dcm.get(0x00541322)
             if cal_factor is None:
-                raise ValueError("Image is not DCAL and Dose Calibration Factor (0054,1322) is unknown.")
+                raise ValueError("Image is not Dose Calibration corrected and Dose Calibration Factor (0054,1322) is unknown.")
             bqml_map = (cps_map * float(cal_factor)) / voxel_vol_ml
 
         return self._compute_bqml(bqml_map)
