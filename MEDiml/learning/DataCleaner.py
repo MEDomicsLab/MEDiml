@@ -44,6 +44,7 @@ class DataCleaner(BaseEstimator, TransformerMixin):
         # Attributes learned during fit
         self.features_to_keep_ = None
         self.imputer_ = None
+        self.dropped_samples_ = []
 
     def fit(self, X: pd.DataFrame, y: pd.DataFrame=None):
         """
@@ -98,6 +99,7 @@ class DataCleaner(BaseEstimator, TransformerMixin):
         # 2. Filter Samples (Rows) based on missingness
         missing_frac_rows = X_transformed.isna().mean(axis=1)
         mask_rows_keep = missing_frac_rows <= self.missing_cutoff_ps
+        self.dropped_samples_ = X_transformed.index[~mask_rows_keep].tolist()
         X_transformed = X_transformed.loc[mask_rows_keep]
         
         # 3. Impute Missing Values
@@ -108,9 +110,14 @@ class DataCleaner(BaseEstimator, TransformerMixin):
 
     def _fit_imputer(self, X):
         """Helper to initialize and fit the correct imputer logic."""
-        # Handle 'random' manually as SimpleImputer doesn't support it
+        # Handle 'random' manually as SimpleImputer doesn't support it.
+        # The observed training values of each feature are stored so that test data is
+        # imputed from the training distribution only (no leakage).
         if "random" in self.imputation_method:
             self.imputer_ = "random" # Marker logic
+            self.random_values_ = {col: X[col].dropna().values for col in X.columns}
+            self.random_fallback_ = X.mean(skipna=True)
+            self.rng_ = check_random_state(self.random_state)
             return
 
         # Map methods to SimpleImputer strategies
@@ -136,11 +143,18 @@ class DataCleaner(BaseEstimator, TransformerMixin):
     def _apply_imputation(self, X):
         """Helper to apply the imputation."""
         if self.imputer_ == "random":
-            rng = check_random_state(self.random_state)
-            # Custom random imputation logic: fill NaNs with random choice from valid values in that column
-            return X.apply(lambda col: col.fillna(
-                np.random.choice(col.dropna().values) if not col.dropna().empty else col.mean() # Fallback if empty
-            ))
+            # Custom random imputation logic: fill each NaN with a random draw from the training values of that column
+            X = X.copy()
+            for col in X.columns:
+                mask = X[col].isna()
+                if not mask.any():
+                    continue
+                values = self.random_values_[col]
+                if values.size > 0:
+                    X.loc[mask, col] = self.rng_.choice(values, size=int(mask.sum()))
+                else:
+                    X.loc[mask, col] = self.random_fallback_[col] # Fallback if no training values
+            return X
         else:
             return self.imputer_.transform(X)
 
