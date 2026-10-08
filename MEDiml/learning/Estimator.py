@@ -4,9 +4,17 @@ from ..utils.pycaret_learner import PyCaretEstimator
 
 
 class Estimator(BaseEstimator, ClassifierMixin):
-    def __init__(self, algorithm: str, ml_config: dict):
+    def __init__(self, algorithm: str, ml_config: dict, log_file=None):
+        """
+        Args:
+            algorithm (str): PyCaret classification model ID, or 'best'.
+            ml_config (dict): Modeling options passed to the PyCaret estimator.
+            log_file (str or Path, optional): Log file of the current split/run, used to log
+                all training steps. Defaults to None (standard ``logging`` configuration).
+        """
         self.ml_config = ml_config
         self.algorithm = algorithm
+        self.log_file = log_file
         self.estimator_ = None
 
     def _initialize_estimator(self):
@@ -16,7 +24,7 @@ class Estimator(BaseEstimator, ClassifierMixin):
         'lr', 'dt', 'lightgbm', ...) or 'best' to auto-select via PyCaret's compare_models().
         Invalid model IDs are rejected by PyCaret itself.
         """
-        return PyCaretEstimator(algorithm=self.algorithm, **self.ml_config)
+        return PyCaretEstimator(algorithm=self.algorithm, log_file=self.log_file, **self.ml_config)
 
     def fit(self, X, y):
         self.estimator_ = self._initialize_estimator()
