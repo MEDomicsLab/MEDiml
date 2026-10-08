@@ -1,18 +1,25 @@
+import logging
+import os
+import time
+from contextlib import contextmanager
 from copy import deepcopy
 
 import numpy as np
 import pandas as pd
 from pycaret.classification import *
 from sklearn import metrics
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
 from ..learning.ml_utils import finalize_rad_table, intersect_var_tables
+
+logger = logging.getLogger(__name__)
 
 
 class PyCaretEstimator(BaseEstimator, ClassifierMixin):
     def __init__(
             self,
-            algorithm='xgboost',
+            algorithm='best',
             optimization_metric='MCC',
             n_features_to_select=0.05,
             internal_cv_folds=5,
@@ -22,8 +29,14 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
             feature_selection_estimator='lightgbm',
             create_model_kwargs=None,
             best_include=None,
-            best_exclude=None
+            best_exclude=None,
+            log_file=None
         ):
+        """
+        Args:
+            log_file (str or Path, optional): Log file of the current split/run. If given, all training steps
+                are appended to it; otherwise, messages go through the standard ``logging`` configuration.
+        """
         # Store all parameters as attributes
         self.algorithm = algorithm
         self.optimization_metric = optimization_metric
@@ -36,6 +49,7 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         self.create_model_kwargs = create_model_kwargs
         self.best_include = best_include
         self.best_exclude = best_exclude
+        self.log_file = log_file
 
         # This will hold the "model_info" dictionary result
         self.model_info_ = None
@@ -51,7 +65,8 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         if not isinstance(y, pd.DataFrame):
             y = pd.DataFrame(y)
 
-        results, self.classifier_ = self._train_logic(X, y)
+        with self._logging_to_file():
+            results, self.classifier_ = self._train_logic(X, y)
 
         self.model_info_ = results
         self.selected_features_ = results['var_names']
@@ -76,6 +91,38 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         X_filtered = X[self.selected_features_]
         return self.classifier_.predict_proba(X_filtered)[:, 1]
 
+    @contextmanager
+    def _logging_to_file(self):
+        """
+        Routes this module's log messages to ``self.log_file`` while fitting. If a handler already
+        writes to that file (e.g. the split's batch log set up by RadiomicsLearner), it is reused so
+        that both writers share the same file position.
+        """
+        if self.log_file is None:
+            yield
+            return
+
+        path_log = os.path.abspath(str(self.log_file))
+        handler = next((h for h in logging.getLogger().handlers
+                        if isinstance(h, logging.FileHandler) and h.baseFilename == path_log), None)
+        own_handler = handler is None
+        if own_handler:
+            handler = logging.FileHandler(path_log, mode='a')
+            handler.setFormatter(logging.Formatter('%(message)s'))
+
+        previous_level, previous_propagate = logger.level, logger.propagate
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            yield
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+            logger.propagate = previous_propagate
+            if own_handler:
+                handler.close()
+
     def _train_logic(self, var_table_train, outcome_table_binary_train):
         """
         Trains a PyCaret classification model for the given machine learning test.
@@ -97,7 +144,15 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         temp_data = pd.merge(var_table_train, outcome_table_binary_train, left_index=True, right_index=True)
         target_col = outcome_table_binary_train.columns[0]
 
+        logger.info(f"{' ' * 4}--> ESTIMATOR ({self.algorithm})")
+        logger.info(f"{' ' * 8}...Training data: {var_table_train.shape[0]} patients, {var_table_train.shape[1]} features, "
+                    f"class counts: {outcome_table_binary_train.iloc[:, 0].value_counts().sort_index().to_dict()}")
+
         # PyCaret setup
+        tstart = time.time()
+        logger.info(f"{' ' * 8}...PyCaret setup and feature selection "
+                    f"(estimator: {self.feature_selection_estimator}, n_features_to_select: {self.n_features_to_select}, "
+                    f"internal CV folds: {self.internal_cv_folds}, seed: {self.seed})")
         setup(
             data=temp_data,
             target=target_col,
@@ -118,9 +173,13 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
         # Set seed
         if self.seed is not None:
             set_config('seed', self.seed)
+        logger.info(f"{' ' * 8}...Done in {time.time() - tstart:.2f} sec")
 
         # Creating the model using PyCaret
+        tstart = time.time()
         if self.algorithm == 'best':
+            logger.info(f"{' ' * 8}...Comparing models (sort: {self.optimization_metric}, "
+                        f"include: {self.best_include}, exclude: {self.best_exclude})")
             classifier = compare_models(
                 include=self.best_include,
                 exclude=self.best_exclude,
@@ -129,33 +188,60 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
                 verbose=False
             )
             resolved_algo = classifier.__class__.__name__
+            logger.info(f"{' ' * 8}...Best model: {resolved_algo}")
         else:
+            logger.info(f"{' ' * 8}...Creating model '{self.algorithm}' "
+                        f"(create_model_kwargs: {self.create_model_kwargs or {}})")
             classifier = create_model(self.algorithm, **(self.create_model_kwargs or {}), verbose=False)
             resolved_algo = self.algorithm
+        logger.info(f"{' ' * 8}...Done in {time.time() - tstart:.2f} sec")
 
         # Tuning the model using PyCaret
+        tstart = time.time()
+        logger.info(f"{' ' * 8}...Tuning hyperparameters (optimize: {self.optimization_metric})")
         classifier = tune_model(classifier, optimize=self.optimization_metric, verbose=False)
+        logger.info(f"{' ' * 8}...Tuned parameters: {classifier.get_params()}")
+        logger.info(f"{' ' * 8}...Done in {time.time() - tstart:.2f} sec")
 
         # MEDiml relies on predict_proba for AUC/threshold-based evaluation, but some PyCaret
         # models don't natively support it (e.g. 'svm' -> SGDClassifier with hinge loss, 'ridge'
         # -> RidgeClassifier). Calibrate those so they still produce probability estimates.
         if not hasattr(classifier, 'predict_proba'):
+            logger.info(f"{' ' * 8}...Model has no predict_proba, calibrating probabilities")
             classifier = calibrate_model(classifier, verbose=False)
+
+        # PyCaret fits models on its internal train split only (train_size=0.7 by default),
+        # so the tuned model is re-fitted on all the given training data (selected features)
+        selected_features = list(classifier.feature_names_in_)
+        X_selected = var_table_train[selected_features]
+        y_train = outcome_table_binary_train.iloc[:, 0]
+        logger.info(f"{' ' * 8}...Selected features ({len(selected_features)}): {selected_features}")
+
+        # Find threshold (on out-of-fold predictions, before the final refit)
+        if self.optimize_threshold:
+            tstart = time.time()
+            try:
+                threshold = self.__find_balanced_threshold(classifier, X_selected, y_train)
+                logger.info(f"{' ' * 8}...Optimized decision threshold: {threshold:.4f} "
+                            f"(done in {time.time() - tstart:.2f} sec)")
+            except Exception as e:
+                logger.warning(f"{' ' * 8}...Error in finding optimal threshold, it will be set to 0.5: {e}")
+                threshold = 0.5
+        else:
+            threshold = 0.5
+            logger.info(f"{' ' * 8}...Threshold optimization disabled, using 0.5")
+
+        tstart = time.time()
+        classifier = clone(classifier).fit(X_selected, y_train)
+        logger.info(f"{' ' * 8}...Final fit on all {X_selected.shape[0]} training patients "
+                    f"done in {time.time() - tstart:.2f} sec")
 
         # Saving the information of the model in a dictionary
         model_info = dict()
         model_info['algo'] = resolved_algo
         model_info['type'] = 'binary'
 
-        # Find threshold
-        if self.optimize_threshold:
-            try:
-                model_info['threshold'] = self.__find_balanced_threshold(classifier, var_table_train, outcome_table_binary_train)
-            except Exception as e:
-                print('Error in finding optimal threshold, it will be set to 0.5:' + str(e))
-                model_info['threshold'] = 0.5
-        else:
-            model_info['threshold'] = 0.5
+        model_info['threshold'] = threshold
 
         user_data = var_table_train.Properties.get('userData', {}) if hasattr(var_table_train, 'Properties') else {}
         model_info['var_info'] = deepcopy(user_data)
@@ -182,16 +268,16 @@ class PyCaretEstimator(BaseEstimator, ClassifierMixin):
             return value
         return repr(value)
 
-    def __find_balanced_threshold(self, model, variable_table, outcome_table_binary) -> float:
-        # Align features
-        if hasattr(model, 'feature_names_in_'):
-            variable_table = variable_table[list(model.feature_names_in_)]
-
-        # Get probabilities
-        y_probs = model.predict_proba(variable_table)[:, 1]
+    def __find_balanced_threshold(self, model, variable_table, outcome_binary) -> float:
+        # Out-of-fold probabilities: in-sample predictions of a tuned model are over-confident
+        n_splits = min(self.internal_cv_folds, int(outcome_binary.value_counts().min()))
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self.seed)
+        logger.info(f"{' ' * 8}...Optimizing decision threshold on {n_splits}-fold out-of-fold predictions")
+        y_probs = cross_val_predict(clone(model), variable_table, outcome_binary, cv=cv, method='predict_proba')[:, 1]
 
         # ROC Calculation
-        fpr, tpr, thresholds = metrics.roc_curve(outcome_table_binary.iloc[:, 0], y_probs)
+        fpr, tpr, thresholds = metrics.roc_curve(outcome_binary, y_probs)
+        logger.info(f"{' ' * 8}...Out-of-fold AUC: {metrics.auc(fpr, tpr):.4f}")
 
         # Geometric optimization (closest to top-left corner)
         # Distance = sqrt( fpr^2 + (1-tpr)^2 )
