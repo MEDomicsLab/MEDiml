@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -266,6 +267,157 @@ def test_final_model_preprocessing_excludes_holdout(tmp_path, monkeypatch):
         learner.train_final_model()
 
     assert sorted(seen['patients_train']) == learn
+
+
+def test_final_model_uses_custom_outcomes_path(tmp_path, monkeypatch):
+    from MEDiml.learning.RadiomicsLearner import RadiomicsLearner
+
+    learn = ['p1', 'p2', 'p3']
+    path_learn = tmp_path / 'learn__exp'
+    (path_learn / 'test__001').mkdir(parents=True)
+    (tmp_path / 'patientsLearn.json').write_text(json.dumps(learn))
+    path_outcomes = tmp_path / 'elsewhere' / 'my_custom_outcomes.csv'
+    path_outcomes.parent.mkdir()
+    pd.DataFrame({'outcome': [0, 1, 0]}, index=learn).to_csv(path_outcomes)
+    (tmp_path / 'ml.json').write_text(json.dumps({'variables': {'varStudy': 'var1'}, 'modeling': {}}))
+    (path_learn / 'test__001' / 'paths_ml.json').write_text(json.dumps({'ml': str(tmp_path / 'ml.json')}))
+
+    seen = {}
+    def fake_pre_process(self, ml, var_id, outcome_table_binary, patients_train):
+        seen['patients_train'] = list(patients_train)
+        raise RuntimeError('stop')
+    monkeypatch.setattr(RadiomicsLearner, 'pre_process_radiomics_table', fake_pre_process)
+
+    learner = RadiomicsLearner(tmp_path, tmp_path, tmp_path, 'exp', path_outcomes=path_outcomes)
+    with pytest.raises(ValueError, match='stop'):
+        learner.train_final_model()
+
+    assert sorted(seen['patients_train']) == learn
+
+
+def test_design_experiment_records_custom_outcomes_path(tmp_path):
+    from MEDiml.learning.DesignExperiment import DesignExperiment
+
+    path_outcomes = tmp_path / 'my_custom_outcomes.csv'
+    experiment = DesignExperiment(tmp_path, tmp_path, tmp_path / 'settings.yml', 'exp', path_outcomes=path_outcomes)
+    path_run = tmp_path / 'learn__exp'
+    path_run.mkdir()
+    ml_path = experiment._DesignExperiment__create_folder_and_content(path_run, 'test__001', ['p1'], ['p2'], [])
+
+    paths_ml = json.loads(ml_path[0].read_text())
+    assert paths_ml['outcomes'] == str(path_outcomes)
+
+
+def test_design_experiment_raises_on_missing_outcomes(tmp_path):
+    from MEDiml.learning.DesignExperiment import DesignExperiment
+
+    (tmp_path / 'patientsLearn.json').write_text(json.dumps(['p1']))
+    experiment = DesignExperiment(tmp_path, tmp_path, tmp_path / 'settings.yml', 'exp',
+                                  path_outcomes=tmp_path / 'missing.csv')
+    with pytest.raises(FileNotFoundError, match='missing.csv'):
+        experiment.create_experiment(ml={})
+
+
+def test_design_experiment_defaults_to_workspace_outcomes(tmp_path):
+    from MEDiml.learning.DesignExperiment import DesignExperiment
+
+    experiment = DesignExperiment(tmp_path / 'study', tmp_path / 'workspace', tmp_path / 'settings.yml', 'exp')
+    assert experiment.path_outcomes == tmp_path / 'workspace' / 'outcomes.csv'
+
+
+def test_stats_loads_outcomes_from_paths_ml(tmp_path):
+    from MEDiml.learning.Stats import Stats
+
+    path_outcomes = tmp_path / 'my_custom_outcomes.csv'
+    pd.DataFrame({'PatientID': ['p1', 'p2'], 'outcome': [0, 1]}).to_csv(path_outcomes, index=False)
+    path_learn = tmp_path / 'learn__exp_morph_CT'
+    (path_learn / 'test__001').mkdir(parents=True)
+    (path_learn / 'test__001' / 'paths_ml.json').write_text(json.dumps({'outcomes': str(path_outcomes)}))
+
+    outcomes = Stats._load_outcomes(path_learn)
+    assert list(outcomes.index) == ['p1', 'p2']
+
+
+def test_binary_outcome_defaults_to_first_column():
+    from MEDiml.learning.ml_utils import get_binary_outcome_table
+
+    table = pd.DataFrame({'IDH_binary': [0, 1], 'OS_binary': [1, 1]}, index=['p1', 'p2'])
+    out = get_binary_outcome_table(table)
+    assert list(out.columns) == ['IDH_binary']
+    assert list(out.index) == ['p1', 'p2']
+
+
+def test_binary_outcome_uses_named_column():
+    from MEDiml.learning.ml_utils import get_binary_outcome_table
+
+    table = pd.DataFrame({'IDH_binary': [0, 1], 'OS_binary': [1, 0]}, index=['p1', 'p2'])
+    out = get_binary_outcome_table(table, 'OS_binary')
+    assert list(out['OS_binary']) == [1, 0]
+
+
+def test_binary_outcome_raises_on_unknown_column():
+    from MEDiml.learning.ml_utils import get_binary_outcome_table
+
+    table = pd.DataFrame({'IDH_binary': [0, 1]}, index=['p1', 'p2'])
+    with pytest.raises(ValueError, match="'outcome' not found.*IDH_binary"):
+        get_binary_outcome_table(table, 'outcome')
+
+
+def test_binary_outcome_raises_on_non_binary_values():
+    from MEDiml.learning.ml_utils import get_binary_outcome_table
+
+    table = pd.DataFrame({'OS_time': [12.5, 30.0]}, index=['p1', 'p2'])
+    with pytest.raises(ValueError, match='must be binary'):
+        get_binary_outcome_table(table)
+
+
+def test_binary_outcome_allows_missing_values():
+    from MEDiml.learning.ml_utils import get_binary_outcome_table
+
+    table = pd.DataFrame({'IDH_binary': [0, None, 1]}, index=['p1', 'p2', 'p3'])
+    assert len(get_binary_outcome_table(table)) == 3
+
+
+def test_design_experiment_records_outcome_column(tmp_path):
+    from MEDiml.learning.DesignExperiment import DesignExperiment
+
+    learn = ['p1', 'p2', 'p3', 'p4']
+    (tmp_path / 'patientsLearn.json').write_text(json.dumps(learn))
+    path_outcomes = tmp_path / 'outcomes.csv'
+    pd.DataFrame({'IDH_binary': [0, 1, 0, 1], 'OS_binary': [1, 0, 1, 0]}, index=learn).to_csv(path_outcomes)
+    ml = {'study_metadata': {'outcome_column': 'OS_binary'},
+          'design': {'active_method': ['CV'], 'CV': {'nFolds': 2, 'seed': 1}}}
+
+    experiment = DesignExperiment(tmp_path, tmp_path, tmp_path / 'settings.yml', 'exp', path_outcomes=path_outcomes)
+    runs = experiment.create_experiment(ml=ml)
+
+    paths_ml = json.loads(Path(runs['run1']).read_text())
+    assert paths_ml['outcome_column'] == 'OS_binary'
+
+
+def test_design_experiment_raises_on_unknown_outcome_column(tmp_path):
+    from MEDiml.learning.DesignExperiment import DesignExperiment
+
+    (tmp_path / 'patientsLearn.json').write_text(json.dumps(['p1']))
+    pd.DataFrame({'IDH_binary': [0]}, index=['p1']).to_csv(tmp_path / 'outcomes.csv')
+    experiment = DesignExperiment(tmp_path, tmp_path, tmp_path / 'settings.yml', 'exp')
+    with pytest.raises(ValueError, match="'outcome' not found"):
+        experiment.create_experiment(ml={'study_metadata': {'outcome_column': 'outcome'}})
+
+
+def test_stats_uses_binary_column_not_time_column(tmp_path):
+    from MEDiml.learning.Stats import Stats
+
+    path_outcomes = tmp_path / 'outcomes.csv'
+    pd.DataFrame({'ID': ['p1', 'p2'], 'IDH_binary': [0, 1], 'IDH_time': [12.5, 30.0]}).to_csv(path_outcomes, index=False)
+    path_learn = tmp_path / 'learn__exp_morph_CT'
+    (path_learn / 'test__001').mkdir(parents=True)
+    (path_learn / 'test__001' / 'paths_ml.json').write_text(
+        json.dumps({'outcomes': str(path_outcomes), 'outcome_column': 'IDH_binary'}))
+
+    outcomes = Stats._load_outcomes(path_learn)
+    assert list(outcomes.columns) == ['IDH_binary']
+    assert outcomes.loc['p2'].iloc[0] == 1
 
 
 def test_estimator_logs_training_steps_to_log_file(tmp_path):

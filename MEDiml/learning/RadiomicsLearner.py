@@ -13,8 +13,10 @@ from MEDiml.learning.DataCleaner import DataCleaner
 from MEDiml.learning.DesignExperiment import DesignExperiment
 from MEDiml.learning.Estimator import Estimator
 from MEDiml.learning.FSR import FSR
-from MEDiml.learning.ml_utils import (average_results, combine_rad_tables,
+from MEDiml.learning.ml_utils import (DEFAULT_OUTCOMES_FILENAME,
+                                      average_results, combine_rad_tables,
                                       feature_importance_analysis,
+                                      get_binary_outcome_table,
                                       get_ml_test_table,
                                       get_radiomics_table, intersect)
 from MEDiml.learning.Normalization import CombatNormalization
@@ -24,19 +26,28 @@ from ..utils.json_utils import load_json, save_json
 
 
 class RadiomicsLearner:
-    def __init__(self, path_study: Path, path_workspace: Path, path_settings: Path, experiment_label: str) -> None:
+    def __init__(
+            self,
+            path_study: Path,
+            path_workspace: Path,
+            path_settings: Path,
+            experiment_label: str,
+            path_outcomes: Path = None
+        ) -> None:
         """
         Constructor of the class DesignExperiment.
 
         Args:
             path_study (Path): Path to the main study folder where patients partition dictionaries are found.
-            path_workspace (Path): Path to the folder where features and outcome files are found.
+            path_workspace (Path): Path to the folder where features are found.
             path_settings (Path): Path to the settings folder.
             experiment_label (str): String specifying the label to attach to a given learning experiment in 
                 "path_experiments". This label will be attached to the ml__$experiments_label$.json file as well
                 as the learn__$experiment_label$ folder. This label is used to keep track of different experiments 
                 with different settings (e.g. radiomics, scans, machine learning algorithms, etc.).
-        
+            path_outcomes (Path, optional): Path to the outcomes CSV file. Defaults to
+                "path_workspace/outcomes.csv".
+
         Returns:
             None
         """
@@ -44,6 +55,8 @@ class RadiomicsLearner:
         self.path_workspace = Path(path_workspace)
         self.path_settings = Path(path_settings)
         self.experiment_label = experiment_label
+        self.path_outcomes = Path(path_outcomes) if path_outcomes is not None \
+            else self.path_workspace / DEFAULT_OUTCOMES_FILENAME
     
     def __load_ml_info(self, ml_dict_paths: Dict) -> Dict:
         """
@@ -64,7 +77,7 @@ class RadiomicsLearner:
 
         # Outcome table for training and test patients
         outcome_table = pd.read_csv(ml_dict_paths['outcomes'], index_col=0)
-        ml_dict['outcome_table_binary'] = outcome_table.iloc[:, [0]]
+        ml_dict['outcome_table_binary'] = get_binary_outcome_table(outcome_table, ml_dict_paths.get('outcome_column'))
         if outcome_table.shape[1] == 2:
             ml_dict['outcome_table_time'] = outcome_table.iloc[:, [1]]
         
@@ -449,23 +462,23 @@ class RadiomicsLearner:
             else:
                 patients_holdout = load_json(self.path_study / 'patientsHoldOut.json')
             
-            # Load outcomes table
-            outcome_table = pd.read_csv(self.path_workspace / 'outcomes.csv', index_col=0)
-            outcome_table_binary = outcome_table.iloc[:, [0]]
-            
-            # Filter to patients in learning set
-            patients_final_train = intersect(patients_final_train, list(outcome_table_binary.index))
-
             # Get ML configuration from one of the splits
             test_paths = list(path_learn.glob('test__*'))
             if not test_paths:
                 logging.error("No test folders found in results folder")
                 raise ValueError(f"No test folders found at {path_learn}")
-            
+
             ml_dict_paths = load_json(test_paths[0] / 'paths_ml.json')
             ml = load_json(ml_dict_paths['ml'])
             var_id = str(ml['variables']['varStudy'])
-            
+
+            # Load outcomes table
+            outcome_table = pd.read_csv(self.path_outcomes, index_col=0)
+            outcome_table_binary = get_binary_outcome_table(outcome_table, ml_dict_paths.get('outcome_column'))
+
+            # Filter to patients in learning set
+            patients_final_train = intersect(patients_final_train, list(outcome_table_binary.index))
+
             
             logging.info(f"...Variable ID: {var_id}")
             logging.info(f"...Done in {time.time()-tstart:.2f} sec")
@@ -582,7 +595,13 @@ class RadiomicsLearner:
             None
         """
         # Initialize the DesignExperiment class
-        experiment = DesignExperiment(self.path_study, self.path_workspace, self.path_settings, self.experiment_label)
+        experiment = DesignExperiment(
+            self.path_study,
+            self.path_workspace,
+            self.path_settings,
+            self.experiment_label,
+            self.path_outcomes
+        )
 
         # Generate the machine learning experiment
         tests_dict = experiment.generate_experiment()

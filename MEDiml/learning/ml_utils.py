@@ -24,6 +24,8 @@ METRICS_LIST = [
     'Precision', 'NPV', 'F1_score', 'Accuracy', 'MCC',
     'TN', 'FP', 'FN', 'TP'
 ]
+# Default name of the outcomes table (used when no explicit path is given)
+DEFAULT_OUTCOMES_FILENAME = 'outcomes.csv'
 
 def average_results(path_results: Path, save: bool = False) -> dict:
     """
@@ -254,22 +256,55 @@ def convert_comibnations_to_list(combinations_string: str) -> Tuple[List, List]:
     
     return combinations, model_ids
 
-def count_class_imbalance(path_csv_outcomes: Path) -> Dict:
+def get_binary_outcome_table(outcome_table: pd.DataFrame, outcome_column: str = None) -> pd.DataFrame:
+    """
+    Selects and validates the binary outcome column of an outcome table. The table must be
+    indexed by the patient IDs (i.e. loaded with ``index_col=0``).
+
+    Args:
+        outcome_table (pd.DataFrame): Outcome table indexed by patient IDs.
+        outcome_column (str, optional): Name of the binary outcome column. If None, the first
+            column after the patient IDs is used.
+
+    Returns:
+        pd.DataFrame: Single-column table with the binary outcome, indexed by patient IDs.
+    """
+    if outcome_column is None:
+        if outcome_table.shape[1] == 0:
+            raise ValueError("The outcome table has no outcome column besides the patient IDs.")
+        outcome_column = outcome_table.columns[0]
+    elif outcome_column not in outcome_table.columns:
+        raise ValueError(
+            f"Outcome column '{outcome_column}' not found in the outcome table. "
+            f"Available columns: {list(outcome_table.columns)}"
+        )
+
+    outcome_table_binary = outcome_table[[outcome_column]]
+    values = set(outcome_table_binary[outcome_column].dropna().unique())
+    if not values <= {0, 1}:
+        raise ValueError(
+            f"Outcome column '{outcome_column}' must be binary (0/1). Found values: {sorted(values, key=str)}"
+        )
+
+    return outcome_table_binary
+
+def count_class_imbalance(path_csv_outcomes: Path, outcome_column: str = None) -> Dict:
     """
     Counts the class imbalance in a given outcome table.
-    
+
     Args:
         path_csv_outcomes (Path): Path to the outcome table.
+        outcome_column (str, optional): Name of the binary outcome column. If None, the first
+            column after the patient IDs is used.
 
     Returns:
         Dict: Dictionary containing the count of each class.
     """
     # Initialization
-    outcomes = pandas.read_csv(path_csv_outcomes, sep=',')
-    outcomes.dropna(inplace=True)
-    outcomes.reset_index(inplace=True, drop=True)
-    name_outcome = outcomes.columns[-1]
-    
+    outcomes = get_binary_outcome_table(pandas.read_csv(path_csv_outcomes, index_col=0), outcome_column)
+    outcomes = outcomes.dropna()
+    name_outcome = outcomes.columns[0]
+
     # Counting the percentage of each class
     class_0_perc = np.sum(outcomes[name_outcome] == 0) / len(outcomes)
     class_1_perc = np.sum(outcomes[name_outcome] == 1) / len(outcomes)
@@ -417,7 +452,7 @@ def create_holdout_set(
     outcomes.reset_index(inplace=True, drop=True)   # Reset index        
 
     # Save the outcome table
-    paths_exp_outcomes = str(path_split + '/outcomes.csv')
+    paths_exp_outcomes = str(path_split + '/' + DEFAULT_OUTCOMES_FILENAME)
     outcomes.to_csv(paths_exp_outcomes, index=False)
 
     # Save dict of patientsLearn

@@ -26,6 +26,30 @@ Defines high-level experiment identifiers and global variables.
      var_study: "var1"
      combinations: ["var1"]
      seed: &global_seed 54288  # YAML anchor used to sync seeds across the pipeline
+     outcome_column: "IDH_binary"  # Optional: name of the binary outcome column in the outcomes table
+
+Outcomes Table
+""""""""""""""
+
+The outcomes table is a CSV file whose **first column contains the patient IDs**. Every other column
+can hold an outcome, so a single file can store several outcomes (e.g. ``IDH_binary``, ``OS_binary``).
+
+* **File location**: pass the path to the outcomes file with the ``path_outcomes`` argument of
+  ``RadiomicsLearner``. The file can have any name. If not given, ``outcomes.csv`` in the workspace folder is used.
+* **Outcome column**: set ``outcome_column`` in ``study_metadata`` to choose which column to predict.
+  If not set, the first column after the patient IDs is used.
+* **Validation**: an error is raised if the outcome column does not exist (the available columns are listed)
+  or if it contains values other than 0 and 1 (missing values are allowed).
+
+.. code-block:: python
+
+   learner = MEDiml.learning.RadiomicsLearner(
+       path_study=path_study,
+       path_workspace=path_workspace,
+       path_settings=path_settings,
+       experiment_label=experiment_label,
+       path_outcomes=path_workspace / "my_outcomes.csv"
+   )
 
 Experiment Design Parameters
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -158,6 +182,7 @@ Below is a complete example of a ``config.yaml`` file incorporating all the sect
      var_study: "var1"
      combinations: ["var1"]
      seed: &global_seed 54288
+     outcome_column: "IDH_binary"
 
    design:
      active_method: "CrossValidation"

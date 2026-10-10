@@ -6,6 +6,9 @@ study_metadata:
   var_study: "var1"
   combinations: ["var1"]
   seed: &global_seed 54288
+  # Optional: name of the binary outcome column in the outcomes table
+  # (defaults to the first column after the patient IDs)
+  # outcome_column: "IDH_binary"
 
 # -----------------------------------------------------------------------------
 # 1. DATA PARTIONING

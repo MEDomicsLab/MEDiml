@@ -9,29 +9,43 @@ import yaml
 
 from ..utils.get_institutions_from_ids import get_institutions_from_ids
 from ..utils.json_utils import load_json, posix_to_string, save_json
-from .ml_utils import cross_validation_split, get_stratified_splits
+from .ml_utils import (DEFAULT_OUTCOMES_FILENAME, cross_validation_split,
+                       get_binary_outcome_table, get_stratified_splits)
 
 
 class DesignExperiment:
-    def __init__(self, path_study: Path, path_workspace: Path, path_settings: Path, experiment_label: str) -> None:
+    def __init__(
+            self,
+            path_study: Path,
+            path_workspace: Path,
+            path_settings: Path,
+            experiment_label: str,
+            path_outcomes: Path = None
+        ) -> None:
         """
         Constructor of the class DesignExperiment.
 
         Args:
-            path_study (Path): Path to the main study folder where the outcomes, 
-                learning patients and holdout patients dictionaries are found.
+            path_study (Path): Path to the main study folder where the learning patients
+                and holdout patients dictionaries are found.
+            path_workspace (Path): Path to the folder where features are found.
             path_settings (Path): Path to the settings file.
             experiment_label (str): String specifying the label to attach to a given learning experiment in 
                 "path_experiments". This label will be attached to the ml__$experiments_label$.json file as well
                 as the learn__$experiment_label$ folder. This label is used to keep track of different experiments 
                 with different settings (e.g. radiomics, scans, machine learning algorithms, etc.).
-        
+            path_outcomes (Path, optional): Path to the outcomes CSV file. Defaults to
+                "path_workspace/outcomes.csv".
+
         Returns:
             None
         """
         self.path_study = Path(path_study)
         self.path_settings = Path(path_settings)
         self.path_workspace = Path(path_workspace)
+        self.path_outcomes = Path(path_outcomes) if path_outcomes is not None \
+            else self.path_workspace / DEFAULT_OUTCOMES_FILENAME
+        self.outcome_column = None
         self.experiment_label = str(experiment_label)
         self.path_ml_object = None
 
@@ -65,7 +79,8 @@ class DesignExperiment:
         save_json(path_test, sorted(patients_test))
         paths_ml['patientsTrain'] = path_train
         paths_ml['patientsTest'] = path_test
-        paths_ml['outcomes'] = self.path_workspace / 'outcomes.csv'
+        paths_ml['outcomes'] = self.path_outcomes
+        paths_ml['outcome_column'] = self.outcome_column
         paths_ml['ml'] = self.path_ml_object
         paths_ml['results'] = path_run / 'run_results.json'
         path_file = path_run / 'paths_ml.json'
@@ -248,7 +263,17 @@ class DesignExperiment:
         patients_learn = load_json(self.path_study / 'patientsLearn.json')
         
         # Outcomes table
-        outcomes_table = pd.read_csv(self.path_workspace / 'outcomes.csv', index_col=0)
+        if not self.path_outcomes.exists():
+            raise FileNotFoundError(
+                f"Outcomes file not found at: {self.path_outcomes}. "
+                "Please provide the correct path using the 'path_outcomes' argument."
+            )
+        outcomes_table = pd.read_csv(self.path_outcomes, index_col=0)
+
+        # Select the binary outcome column (first column after the patient IDs if not specified)
+        outcomes_table = get_binary_outcome_table(
+            outcomes_table, (ml.get('study_metadata') or {}).get('outcome_column'))
+        self.outcome_column = outcomes_table.columns[0]
 
         # keep only patients in learn set and outcomes table
         patients_to_keep = list(filter(lambda x: x in patients_learn, outcomes_table.index.values.tolist()))
