@@ -172,7 +172,10 @@ def get_roi_from_indexes(
             medscan.radiomics.image.update(
                 {('scale'+(str(medscan.params.process.scale_non_text[0])).replace('.', 'dot')): 'ERROR_PROCESSING'})
 
-        raise Exception(message)
+        # Keep ValueError (e.g. unknown ROI name) so callers can tell invalid input apart
+        if isinstance(e, ValueError):
+            raise ValueError(message) from e
+        raise Exception(message) from e
 
     return vol_obj, roi_obj
 
