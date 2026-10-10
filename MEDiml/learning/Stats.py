@@ -65,9 +65,6 @@ class Stats:
         outcome_table = pd.read_csv(paths_ml['outcomes'], index_col=0)
 
         return get_binary_outcome_table(outcome_table, paths_ml.get('outcome_column'))
-
-        # Safety assertion
-        self.__safety_assertion()
     
     def __get_models_dicts(self, split_idx: int) -> Path:
         """
