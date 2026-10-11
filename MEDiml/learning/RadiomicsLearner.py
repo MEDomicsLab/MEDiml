@@ -39,6 +39,7 @@ class RadiomicsLearner:
 
         Args:
             path_study (Path): Path to the main study folder where patients partition dictionaries are found.
+                It's the path returned by the ``create_holdout_set`` function in ml_utils.py.
             path_workspace (Path): Path to the folder where features are found.
             path_settings (Path): Path to the settings folder.
             experiment_label (str): String specifying the label to attach to a given learning experiment in 

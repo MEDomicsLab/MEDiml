@@ -420,6 +420,20 @@ def test_stats_uses_binary_column_not_time_column(tmp_path):
     assert outcomes.loc['p2'].iloc[0] == 1
 
 
+@pytest.mark.parametrize('method', ['random', 'all_learn'])
+def test_create_holdout_set_does_not_copy_outcome_file(tmp_path, method):
+    from MEDiml.learning.ml_utils import create_holdout_set
+
+    ids = [f'p{i}' for i in range(10)]
+    path_outcome_file = tmp_path / 'my_outcomes.csv'
+    pd.DataFrame({'PatientID': ids, 'IDH_binary': [0, 1] * 5}).to_csv(path_outcome_file, index=False)
+
+    path_split = Path(create_holdout_set(path_outcome_file, 'IDH', tmp_path / 'experiments', method=method))
+
+    assert sorted(p.name for p in path_split.iterdir() if p.suffix == '.csv') == []
+    assert (path_split / 'patientsLearn.json').exists()
+
+
 def test_estimator_logs_training_steps_to_log_file(tmp_path):
     log_file = tmp_path / 'batch.log'
     X, y = _make_radiomics_style_data()

@@ -357,11 +357,13 @@ def create_holdout_set(
                 method: str = 'random',
                 percentage: float = 0.2,
                 n_split: int = 1,
-                seed : int = 1) -> None:
+                seed : int = 1) -> str:
     """
-    Creates a hold-out patient set to be used for final independent testing after a final 
-    model is chosen. All the information is saved in a JSON file.
-    
+    Creates a hold-out patient set to be used for final independent testing after a final
+    model is chosen. The learning and hold-out patient IDs are saved in JSON files
+    (patientsLearn.json and patientsHoldOut.json). The outcome file itself is not copied: pass the
+    same file to the learner with the ``path_outcomes`` argument of ``RadiomicsLearner``.
+
     Args:
         path_outcome_file (str): Full path to where the outcome CSV file is stored.
         outcome_name (str): Name of the outcome. For example, 'OS' for overral survivor.
@@ -374,9 +376,9 @@ def create_holdout_set(
         percentage (float): Percentage of patients to use for the hold-out set. Default is 0.2.
         n_split (int): Number of splits to create. Default is 1.
         seed (int): Seed to use for the random split. Default is 1.
-    
+
     Returns:
-        None.
+        str: Path to the folder of the created split (to be used as ``path_study``).
     """
     # Initilization
     outcome_name = outcome_name.upper()
@@ -394,12 +396,6 @@ def create_holdout_set(
     with open(path_outcome_file, 'r') as infile:
         reader = csv.DictReader(infile, delimiter=',')
         var_names = reader.fieldnames
-
-    # Include time to event if it exists
-    flag_time = False
-    if(outcome_name + '_eventFreeTime' in str(var_names)):
-        name_outcome_in_table_time = outcome_name + '_eventFreeTime'
-        flag_time = True
 
     # Check if the outcome name for binary is correct
     if name_outcome_in_table_binary not in outcome_table.columns:
@@ -440,21 +436,6 @@ def create_holdout_set(
     else:
         raise ValueError('Method not recognized. Use "random" or "all_learn".')
     
-    # Creating final outcome table and saving it
-    if flag_time:
-        outcomes = outcome_table[
-            ['PatientID', name_outcome_in_table_binary, name_outcome_in_table_time]]
-    else:
-        outcomes = outcome_table[['PatientID', name_outcome_in_table_binary]]
-
-    # Finalize the outcome table
-    outcomes = outcomes.dropna(inplace=False)   # Drop NaNs
-    outcomes.reset_index(inplace=True, drop=True)   # Reset index        
-
-    # Save the outcome table
-    paths_exp_outcomes = str(path_split + '/' + DEFAULT_OUTCOMES_FILENAME)
-    outcomes.to_csv(paths_exp_outcomes, index=False)
-
     # Save dict of patientsLearn
     paths_exp_patientsLearn = str(path_split) + '/patientsLearn.json'
     patients_learn.to_json(paths_exp_patientsLearn, orient='values', indent=4)
