@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import logging
 import os
@@ -30,6 +31,53 @@ from ..utils.json_utils import load_json, save_json
 from ..utils.parse_nifti_name import parse_nifti_name
 from ..utils.save_MEDscan import save_MEDscan
 from .ProcessDICOM import ProcessDICOM
+
+
+def _plot_spacing_histogram(ax, values, color, nb_bins=20, rel_tol=1e-3):
+    """Plots a voxel spacing histogram with readable x-axis tick labels.
+
+    Spacings read from image headers often differ only by floating-point noise
+    (e.g. 3.26990 vs 3.26996 mm). Plotting them as-is makes matplotlib zoom on that
+    noise and label the axis with an offset (e.g. "1e-5+3.269"). When the spread is
+    negligible relative to the median spacing, the x-range is widened around the
+    median so the data shows up as a single bar.
+
+    Args:
+        ax (matplotlib.axes.Axes): Axes to draw on.
+        values (array-like): Spacing values (NaNs are ignored).
+        color (str): Histogram color.
+        nb_bins (int, optional): Number of bins. Defaults to 20.
+        rel_tol (float, optional): Spread (max - min) below ``rel_tol * |median|`` is
+            considered negligible. Defaults to 1e-3.
+
+    Returns:
+        None.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    lo, hi = values.min(), values.max()
+    center = float(np.median(values))
+    scale = abs(center) if center != 0 else 1.0
+
+    if (hi - lo) <= rel_tol * scale:
+        # Negligible spread: center a wider window on the median. An odd number of
+        # bins keeps the median in the middle of a bin rather than on a bin edge.
+        half_width = 0.05 * scale
+        hist_range = (center - half_width, center + half_width)
+        nb_bins = nb_bins + 1 if nb_bins % 2 == 0 else nb_bins
+    else:
+        hist_range = (lo, hi)
+
+    ax.hist(
+        values, bins=nb_bins, range=hist_range,
+        color=color, alpha=0.80, edgecolor='white', linewidth=0.6
+    )
+    ax.set_xlim(hist_range)
+
+    # Absolute tick values: no offset ("1e-5+3.269") and no scientific notation
+    x_formatter = ScalarFormatter(useOffset=False)
+    x_formatter.set_scientific(False)
+    ax.xaxis.set_major_formatter(x_formatter)
 
 
 class DataManager(object):
@@ -823,12 +871,46 @@ class DataManager(object):
         ) -> List[Path]:
         wildcard = self.__adapt_wildcard_for_format(wildcard, use_dicoms, use_niftis)
         if path_data:
-            file_paths = get_file_paths(path_data, wildcard)
+            path_search = path_data
         elif self.paths._path_save:
-            file_paths = get_file_paths(self.paths._path_save, wildcard)
+            path_search = self.paths._path_save
         else:
             raise ValueError("Path data is invalid.")
+        if use_dicoms:
+            return self.__get_dicom_scan_dirs(path_search, wildcard)
+        file_paths = get_file_paths(path_search, wildcard)
         return self.__filter_file_paths_by_format(file_paths, use_dicoms, use_niftis)
+
+    def __get_dicom_scan_dirs(self, path_search: Union[Path, str], wildcard: str) -> List[Path]:
+        """Returns the folders of the DICOM scans (one folder per 3D volume) matching the wildcard.
+
+        The DICOM dataset must be organized as ``path_search/PatientID/ImagingScanName/*.dcm``.
+
+        Args:
+            path_search (Union[Path, str]): Path to the DICOM dataset.
+            wildcard (str): Wildcard matched against the whole path of the DICOM files.
+
+        Returns:
+            List[Path]: Sorted list of the scan folders.
+        """
+        path_search = Path(path_search)
+        dicom_files = get_file_paths(path_search, '*.dcm')
+        if not dicom_files:
+            raise ValueError(f"No DICOM file (.dcm) was found in: {path_search}")
+        # Each DICOM file is a single slice, so it must be located in a
+        # "PatientID/ImagingScanName" folder holding the whole 3D volume.
+        misplaced = [f for f in dicom_files if len(f.relative_to(path_search).parts) != 3]
+        if misplaced:
+            raise ValueError(
+                f"The DICOM dataset in {path_search} is not organized by patients and imaging scans "
+                f"({len(misplaced)} DICOM file(s) misplaced, e.g. {misplaced[0]}). The expected structure is "
+                "'path_data/PatientID/ImagingScanName/*.dcm', where each patient and each imaging scan "
+                "(modality) is a sub-folder. Please organize your DICOM dataset using the script "
+                "'scripts/process_dataset.py' before running the radiomics pre-checks."
+            )
+        # DICOM file names rarely carry useful info (e.g. modality), so the
+        # wildcard is matched against the whole file path instead.
+        return sorted({f.parent for f in dicom_files if fnmatch.fnmatch(str(f), wildcard)})
 
     def __load_medscan_for_pre_radiomics_checks(
             self,
@@ -838,7 +920,7 @@ class DataManager(object):
             use_niftis: bool
         ):
         if use_dicoms:
-            return self.process_one_dicom(file_path)
+            return DataManager(path_to_dicoms=file_path).process_one_dicom()
         if use_niftis:
             if 'ROI' in file_path.name.split("."):
                 return None
@@ -948,18 +1030,20 @@ class DataManager(object):
             xy_dim["std"] = np.std(xy_dim["data"][~np.isnan(xy_dim["data"])])
             xy_dim["min"] = np.min(xy_dim["data"][~np.isnan(xy_dim["data"])])
             xy_dim["max"] = np.max(xy_dim["data"][~np.isnan(xy_dim["data"])])
-            xy_dim[f"p{min_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])], 
-                                                        min_percentile)
-            xy_dim[f"p{max_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])], 
-                                                        max_percentile)
+            # np.percentile expects [0, 100] while percentiles are given in [0, 1]
+            xy_dim[f"p{min_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])],
+                                                        min_percentile * 100)
+            xy_dim[f"p{max_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])],
+                                                        max_percentile * 100)
             z_dim["mean"] = np.mean(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["median"] = np.median(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["std"] = np.std(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["min"] = np.min(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["max"] = np.max(z_dim["data"][~np.isnan(z_dim["data"])])
-            z_dim[f"p{min_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])], 
-                                                        min_percentile)
-            z_dim[f"p{max_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])], max_percentile)
+            z_dim[f"p{min_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])],
+                                                        min_percentile * 100)
+            z_dim[f"p{max_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])],
+                                                        max_percentile * 100)
             xy_dim["data"] = xy_dim["data"].tolist()
             z_dim["data"] = z_dim["data"].tolist()
 
@@ -973,10 +1057,7 @@ class DataManager(object):
             )
 
             fig, ax = plt.subplots(1, 1, figsize=(12, 5))
-            ax.hist(
-                df_xy['data'].dropna(), bins=20,
-                color=_HIST_COLOR, alpha=0.80, edgecolor='white', linewidth=0.6
-            )
+            _plot_spacing_histogram(ax, df_xy['data'], color=_HIST_COLOR)
             ax.axvline(
                 min_quant.data, linestyle='--', color=_PMIN_COLOR, linewidth=1.8,
                 label=f"p{int(min_percentile * 100)}: {float(min_quant):.3f} mm"
@@ -1023,10 +1104,7 @@ class DataManager(object):
             )
 
             fig, ax = plt.subplots(1, 1, figsize=(12, 5))
-            ax.hist(
-                df_z['data'].dropna(), bins=20,
-                color=_HIST_COLOR, alpha=0.80, edgecolor='white', linewidth=0.6
-            )
+            _plot_spacing_histogram(ax, df_z['data'], color=_HIST_COLOR)
             ax.axvline(
                 min_quant.data, linestyle='--', color=_PMIN_COLOR, linewidth=1.8,
                 label=f"p{int(min_percentile * 100)}: {float(min_quant):.3f} mm"
@@ -1068,7 +1146,11 @@ class DataManager(object):
                 if not self.paths._path_save_checks:
                     print("Warning: save is set to True but the path to save checks is not defined, the checks will not be saved")
                 else:
-                    wildcard = str(wildcard).replace('*', '').replace('.npy', '.json')
+                    wildcard = str(wildcard).replace('*', '')
+                    if '.npy' in wildcard:
+                        wildcard = wildcard.replace('.npy', '')
+                    elif not wildcard.endswith('.json'):
+                        wildcard += '.json'
                     save_json(self.paths._path_save_checks / ('xyDim_' + wildcard), xy_dim, cls=NumpyEncoder)
                     save_json(self.paths._path_save_checks / ('zDim_' + wildcard), z_dim, cls=NumpyEncoder)
 
@@ -1215,10 +1297,11 @@ class DataManager(object):
             roi_data["std"] = np.std(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["min"] = np.min(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["max"] = np.max(roi_data["data"][~np.isnan(roi_data["data"])])
-            roi_data[f"p{min_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])], 
-                                                        min_percentile)
-            roi_data[f"p{max_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])], 
-                                                        max_percentile)
+            # np.percentile expects [0, 100] while percentiles are given in [0, 1]
+            roi_data[f"p{min_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])],
+                                                        min_percentile * 100)
+            roi_data[f"p{max_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])],
+                                                        max_percentile * 100)
             
             # Set bin width if not provided
             if bin_width != 0:
@@ -1309,7 +1392,11 @@ class DataManager(object):
                 if not self.paths._path_save_checks:
                     print("Warning: save is set to True but the path to save checks is not defined, the checks will not be saved")
                 else:
-                    wildcard = str(wildcard).replace('*', '').replace('.npy', '.json')
+                    wildcard = str(wildcard).replace('*', '')
+                    if '.npy' in wildcard:
+                        wildcard = wildcard.replace('.npy', '')
+                    elif not wildcard.endswith('.json'):
+                        wildcard += '.json'
                     save_json(self.paths._path_save_checks / ('roi_data_' + wildcard), roi_data, cls=NumpyEncoder)
 
     def pre_radiomics_checks(
