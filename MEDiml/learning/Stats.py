@@ -234,7 +234,7 @@ class Stats:
         J = np.argsort(x)
         Z = x[J]
         N = len(x)
-        T = np.zeros(N, dtype=np.float)
+        T = np.zeros(N, dtype=float)
         i = 0
         while i < N:
             j = i
@@ -242,7 +242,7 @@ class Stats:
                 j += 1
             T[i:j] = 0.5*(i + j - 1)
             i = j
-        T2 = np.empty(N, dtype=np.float)
+        T2 = np.empty(N, dtype=float)
         # Note(kazeevn) +1 is due to Python using 0-based indexing
         # instead of 1-based in the AUC formula in the paper
         T2[J] = T + 1
@@ -281,9 +281,9 @@ class Stats:
         negative_examples = predictions_sorted_transposed[:, m:]
         k = predictions_sorted_transposed.shape[0]
 
-        tx = np.empty([k, m], dtype=np.float)
-        ty = np.empty([k, n], dtype=np.float)
-        tz = np.empty([k, m + n], dtype=np.float)
+        tx = np.empty([k, m], dtype=float)
+        ty = np.empty([k, n], dtype=float)
+        tz = np.empty([k, m + n], dtype=float)
         for r in range(k):
             tx[r, :] = self.__compute_midrank(positive_examples[r, :])
             ty[r, :] = self.__compute_midrank(negative_examples[r, :])
