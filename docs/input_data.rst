@@ -97,8 +97,14 @@ For example:
     └── ...
 
 Just run the following command: ::
-  
+
   python scripts/process_dataset.py --path-dataset path/to/your/dataset/folder
 
-.. note::
-    Future works will include the automatic pre-processing of datasets according to the package conventions.
+If your dataset is not organized this way yet, the script will organize it for you: all the DICOM files found in the dataset folder
+(and its sub-folders) are grouped by ``PatientID`` and imaging scan (``SeriesInstanceUID``), and copied to a new folder following
+the structure above (``path/to/your/dataset/folder_organized`` by default, use ``--path-save`` to change it). The original dataset is
+not modified. Each imaging scan folder is named after the scan's ``SeriesDescription`` (or its modality if missing), and the RTstruct
+files are copied in the folder of the imaging scan they reference. In both cases, the ``PatientID`` and ``SeriesDescription`` fields
+of the DICOM headers are then updated using the names of the patient and imaging scan folders. ::
+
+  python scripts/process_dataset.py --path-dataset path/to/your/dataset/folder --path-save path/to/the/organized/dataset
